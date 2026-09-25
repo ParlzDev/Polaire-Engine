@@ -1016,6 +1016,113 @@ static void ecs_dense_id_mapping(void)
     ecs_fixture_end(&fx);
 }
 
+// 按 handle_index 索引的数组（row_of、presence 位图、深度缓存）取值上界是
+// entity_capacity，也就是 pool_capacity()。少算一项不是"最后一个实体查不到"，
+// 而是越界：深度缓存那一格从没被初始化过，读出来是堆上的垃圾值。
+//
+// 这条测试把实体池**填满**，于是最后一个实体的 handle_index 正好落在那一格上，
+// 然后检查层级重建的结果。没有 +1 的那一版在这里会拿到一个三十亿的"深度"，
+// 症状是 ecs_rebuild_hierarchy 事实上再也不返回（示例表现为"卡死"）。
+static void ecs_last_slot_of_index_space_is_usable(void)
+{
+    const u32 cap = 16u;
+    ecs_fixture_t fx;
+    ecs_fixture_begin(&fx, "last_slot", cap);
+
+    entity_t ents[16];
+    for (u32 i = 0; i < cap; ++i) {
+        ents[i] = ecs_create_entity(fx.world);
+        EXPECT_TRUE(entity_is_valid(ents[i]));
+        EXPECT_NOT_NULL(ecs_transform_get_or_add(fx.world, ents[i]));
+    }
+    // 星形而不是长链：链会撞上 hierarchy_depth_max 的降级路径，
+    // 而这条测试要验的是"最后一个槽位的数据是对的"，不是环检测。
+    for (u32 i = 1u; i < cap; ++i) {
+        EXPECT_TRUE(ecs_set_parent(fx.world, ents[i], ents[0]));
+    }
+
+    EXPECT_TRUE(ecs_rebuild_hierarchy(fx.world));
+    EXPECT_EQ_U64(ecs_hierarchy_node_count(fx.world), (usize)cap);
+    // 深度只有 0 和 1，所以"实测最大深度"必须是 2。
+    // 这一条就是垃圾值的探针：它要是变成一个大数，说明又有一格没被初始化。
+    EXPECT_EQ_U64(ecs_hierarchy_depth_max_seen(fx.world), 2u);
+
+    // 关键的一条：按层重排里"深度超过上限就按根节点处理"那道兜底**不该被触发**。
+    // 触发了就说明某个实体的深度是从没初始化过的格子里读出来的 ——
+    // 也就是按 handle_index 开的数组少算了一项（+1 的那个 off-by-one）。
+    // 光看深度值和"不卡死"是抓不到它的：兜底会把垃圾值降级成 0，
+    // 于是症状全被盖住，只剩这个计数器会说真话。
+    ecs_world_stats_t stats;
+    ecs_world_get_stats(fx.world, &stats);
+    EXPECT_EQ_U64(stats.hierarchy_rejected_cycles, 0u);
+
+    ecs_update_world_transforms(fx.world);
+
+    // 最后一个实体（handle_index == capacity，正好是过去少算的那一格）
+    const ecs_world_transform_t *last_wt =
+        (const ecs_world_transform_t *)ecs_peek(fx.world, ents[cap - 1u],
+                                                fx.builtin.world_transform);
+    EXPECT_NOT_NULL(last_wt);
+    if (last_wt != NULL) {
+        EXPECT_VEC3_NEAR(mat4_get_translation(last_wt->model), vec3_zero(), 1e-5f);
+    }
+    EXPECT_TRUE(ecs_has(fx.world, ents[cap - 1u], fx.builtin.world_transform));
+
+    ecs_fixture_end(&fx);
+}
+
+// dense id 要在实体销毁之后能被重新发出去。
+//
+// 以前的语义是"next_dense_id 只涨不降"，那说的是"总共创建过多少实体"，
+// 而 dense_to_entity 只有 entity_capacity 项 —— 于是编辑器里删一个建一个，
+// 迟早新实体的 dense 越界：它建成功了，但**不出现在 ecs_collect_entities 里**，
+// 也就永远不会被存盘，且不报任何错。
+static void ecs_dense_ids_are_reused_after_destroy(void)
+{
+    const u32 cap = 8u;
+    ecs_fixture_t fx;
+    ecs_fixture_begin(&fx, "dense_reuse", cap);
+
+    entity_t first[8];
+    for (u32 i = 0; i < cap; ++i) {
+        first[i] = ecs_create_entity(fx.world);
+        EXPECT_TRUE(entity_is_valid(first[i]));
+    }
+    for (u32 i = cap / 2u; i < cap; ++i) {
+        EXPECT_TRUE(ecs_destroy_entity(fx.world, first[i]));
+    }
+
+    // 水位线已经在 cap 上了：没有复用机制的话这一步就会失败（或被挡下）
+    entity_t second[4];
+    for (u32 i = 0; i < cap / 2u; ++i) {
+        second[i] = ecs_create_entity(fx.world);
+        EXPECT_TRUE(entity_is_valid(second[i]));
+    }
+
+    ecs_rebuild_dense_index(fx.world);
+    EXPECT_EQ_U64(ecs_collect_entities(fx.world, NULL, 0u), (usize)cap);
+
+    // 每个存活实体都要能被 dense 找回来，且 dense 互不相同
+    entity_t alive[8];
+    const u32 got = ecs_collect_entities(fx.world, alive, 8u);
+    EXPECT_EQ_U64(got, (usize)cap);
+    dense_id_t seen[8];
+    for (u32 i = 0; i < got; ++i) {
+        const dense_id_t d = ecs_entity_to_dense(fx.world, alive[i]);
+        EXPECT_TRUE(d < (usize)cap);
+        EXPECT_TRUE(entity_equal(ecs_entity_from_dense(fx.world, d), alive[i]));
+        seen[i] = d;
+    }
+    for (u32 i = 0; i < got; ++i) {
+        for (u32 j = i + 1u; j < got; ++j) {
+            EXPECT_TRUE(seen[i] != seen[j]); // 重复的 dense = 存档里两个实体互相覆盖
+        }
+    }
+    EXPECT_TRUE(entity_is_valid(second[0])); // 新建的那批确实活着（不是只拿到号）
+
+    ecs_fixture_end(&fx);
+}
+
 // =============================================================================
 void test_ecs_register(void)
 {
@@ -1047,4 +1154,8 @@ void test_ecs_register(void)
     test_register("ecs", "entity_pool_full_is_reported", ecs_entity_pool_full_is_reported);
     test_register("ecs", "clear_keeps_registry", ecs_clear_keeps_registry);
     test_register("ecs", "dense_id_mapping", ecs_dense_id_mapping);
+    test_register("ecs", "last_slot_of_index_space_is_usable",
+                  ecs_last_slot_of_index_space_is_usable);
+    test_register("ecs", "dense_ids_are_reused_after_destroy",
+                  ecs_dense_ids_are_reused_after_destroy);
 }

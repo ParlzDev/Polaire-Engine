@@ -133,6 +133,15 @@ struct ecs_world_t {
     entity_t  *dense_to_entity; // 长度 entity_capacity
     u32        dense_count;
     bool       dense_dirty;
+    // 销毁后空出来的 dense id 栈。
+    //
+    // 没有它的话 dense 是"总共创建过多少个实体"而不是"同时存在多少个"：
+    // 编辑器里删一个再建一个，几百次之后 next_dense_id 就顶到 entity_capacity，
+    // 于是新实体的 dense 越界 —— 而 dense_to_entity 装不下它，
+    // 结果是新实体**不在 ecs_collect_entities 的结果里**，也就永远不会被存盘。
+    // 这里用栈而不是位图扫描：分配与释放都是 O(1)，且不需要遍历。
+    dense_id_t *dense_free;
+    u32         dense_free_count;
 
     // ---- 系统 ----
     ecs_system_t systems[ECS_MAX_SYSTEMS];
@@ -153,6 +162,22 @@ struct ecs_world_t {
 // 都得靠强转穿透自己定的规则 —— 那 const 就成了装饰。
 const ecs_storage_t *ecs_storage_of(const ecs_world_t *world, ecs_component_id id);
 ecs_storage_t       *ecs_storage_of_mut(ecs_world_t *world, ecs_component_id id);
+
+// 按 handle_index 开的数组（row_of、presence 位图、深度缓存）需要多少项。
+//
+// pool 的 0 号槽永久保留，但**最后一个可用槽的 index 正好等于 pool_capacity()**
+// （capacity = slot_count + 1，而 pool_capacity() 又把它减回 slot_count），
+// 所以 handle_index 的取值是 1..pool_capacity() —— 数组要有 pool_capacity() + 1
+// 项才装得下最后一项。
+//
+// 少这一项的症状不是"最后一个实体查不到"，而是**越界读写**：M5 的 bench 第一次
+// 把实体数跑到等于容量时，最后一个实体的深度缓存项从未被初始化过，读出来的堆上
+// 垃圾值（34 亿）被直接当成它的深度用，于是层级重排那个"按深度分层扫"的循环
+// 跑 34 亿遍 —— 表现是"示例卡死"，根因是一个少写的 +1。
+static inline u32 ecs_handle_index_space(const ecs_world_t *world)
+{
+    return pool_capacity(&world->entities) + 1u;
+}
 
 static inline bool ecs_presence_test(const ecs_storage_t *s, u32 index)
 {

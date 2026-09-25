@@ -209,7 +209,9 @@ ecs_component_id ecs_register_component(ecs_world_t *world, const ecs_component_
                                                : world->config.default_component_capacity;
     const u32 stride = (u32)ENGINE_ALIGN_UP(desc->size, 16u); // 行距至少 16 对齐，
     // 否则结构体里的 vec3 成员会落在非 16 对齐的地址上（未对齐访问在部分平台直接崩）
-    const u32 index_space = pool_capacity(&world->entities); // handle_index 的取值空间
+    // handle_index 的取值空间（见 ecs_handle_index_space 的 +1 理由）：
+    // row_of / presence 都是**按句柄下标**索引的，少一项就是越界写。
+    const u32 index_space = ecs_handle_index_space(world);
     const usize presence_words = ((usize)index_space + 63u) / 64u;
 
     allocator_t *alloc = world->config.allocator;

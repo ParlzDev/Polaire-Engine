@@ -121,9 +121,10 @@ static bool ecs_world_init(ecs_world_t *world, const ecs_world_config_t *config)
     world->topo_capacity = config->entity_capacity;
     world->memory_bytes += topo_bytes;
 
-    // 深度缓存按 handle_index 取值空间来开（比 topo 多一个槽，因为
-    // pool 的 capacity = slot_count + 1，最大 index 正好是 entity_capacity）。
-    const u32 index_space = pool_capacity(&world->entities);
+    // 深度缓存按 handle_index 的取值空间开（ecs_handle_index_space 里写明了
+    // 为什么要 +1）。少一项不会"最后一个实体查不到"，而是越界读一个从未初始化
+    // 的槽位 —— 那个垃圾值会被当成实体的深度，把按层重排的循环放大上亿倍。
+    const u32 index_space = ecs_handle_index_space(world);
     const usize depth_bytes = (usize)index_space * sizeof(u32);
     world->depth_cache = (u32 *)config->allocator->alloc(config->allocator, depth_bytes, 16);
     if (world->depth_cache == NULL) {
@@ -141,8 +142,36 @@ static bool ecs_world_init(ecs_world_t *world, const ecs_world_config_t *config)
     }
     world->memory_bytes += depth_bytes;
 
+    // 空 dense id 栈：上限就是实体容量（同时存活的实体数不会超过它）。
+    const usize dense_free_bytes = (usize)config->entity_capacity * sizeof(dense_id_t);
+    world->dense_free =
+        (dense_id_t *)config->allocator->alloc(config->allocator, dense_free_bytes, 16);
+    if (world->dense_free == NULL) {
+        config->allocator->free(config->allocator, world->depth_cache, depth_bytes);
+        world->depth_cache = NULL;
+        config->allocator->free(config->allocator, world->topo, topo_bytes);
+        world->topo = NULL;
+        config->allocator->free(config->allocator, world->dense_to_entity, dense_bytes);
+        world->dense_to_entity = NULL;
+        pool_destroy(&world->entities);
+        return false;
+    }
+    world->dense_free_count = 0u;
+    world->memory_bytes += dense_free_bytes;
+
     if (!array_init(&world->commands, config->allocator, sizeof(ecs_command_t), 256u)) {
         LOG_ERROR("命令队列初始化失败");
+        // 这条错误路径以前只 return false，把前面拿到的四块内存全丢下了。
+        // 分配失败的清理要一份就够，别等到泄漏检查才想起来。
+        config->allocator->free(config->allocator, world->dense_free, dense_free_bytes);
+        world->dense_free = NULL;
+        config->allocator->free(config->allocator, world->depth_cache, depth_bytes);
+        world->depth_cache = NULL;
+        config->allocator->free(config->allocator, world->topo, topo_bytes);
+        world->topo = NULL;
+        config->allocator->free(config->allocator, world->dense_to_entity, dense_bytes);
+        world->dense_to_entity = NULL;
+        pool_destroy(&world->entities);
         return false;
     }
 
@@ -192,9 +221,17 @@ static void ecs_world_shutdown(ecs_world_t *world)
         world->topo = NULL;
     }
     if (world->depth_cache != NULL) {
+        // 释放必须用**分配时同一个式子**：这里曾经是 pool_capacity()，
+        // 而分配用的是 +1 的取值空间，于是跟踪分配器会在关闭时叫"尺寸不符"。
         alloc->free(alloc, world->depth_cache,
-                    (usize)pool_capacity(&world->entities) * sizeof(u32));
+                    (usize)ecs_handle_index_space(world) * sizeof(u32));
         world->depth_cache = NULL;
+    }
+    if (world->dense_free != NULL) {
+        alloc->free(alloc, world->dense_free,
+                    (usize)world->config.entity_capacity * sizeof(dense_id_t));
+        world->dense_free = NULL;
+        world->dense_free_count = 0u;
     }
 
     array_destroy(&world->commands);
@@ -242,11 +279,29 @@ entity_t ecs_create_entity(ecs_world_t *world)
 
     ecs_entity_record_t *record =
         POOL_GET_AS(&world->entities, handle, ecs_entity_record_t);
-    record->dense_id = world->next_dense_id++;
-    if (record->dense_id == ECS_DENSE_NONE) {
-        record->dense_id = 0u; // 回绕：让 NONE 永远表示"不属于本场景"
-        world->next_dense_id = 1u;
+
+    // dense id 优先复用销毁后空出来的号，其次才推进水位线。
+    //
+    // 只推进不回收的语义是"这个世界总共创建过多少实体"，而不是"同时存在多少"。
+    // 编辑器里删一个建一个，几百次之后水位线顶到 entity_capacity，
+    // 而 dense_to_entity 只有 capacity 项 —— 新实体进不了那张表，
+    // 于是它**不出现在 ecs_collect_entities 里，也就永远不会被存盘**。
+    // 那种"实体建成功了但世界看不见它"的状态必须当场失败，不能留。
+    dense_id_t dense;
+    if (world->dense_free_count > 0u) {
+        dense = world->dense_free[--world->dense_free_count];
+    } else {
+        dense = world->next_dense_id;
+        if (dense >= world->config.entity_capacity) {
+            LOG_ERROR("dense id 空间已满（容量 %u，已用 %u）—— 同时存活的实体没这么多，"
+                      "说明空闲号丢失了",
+                      (unsigned)world->config.entity_capacity, (unsigned)world->next_dense_id);
+            pool_free(&world->entities, handle);
+            return ENTITY_NONE;
+        }
+        world->next_dense_id++;
     }
+    record->dense_id = dense;
     record->reserved = 0u;
 
     const u32 live = pool_count(&world->entities);
@@ -282,6 +337,16 @@ bool ecs_destroy_immediate(ecs_world_t *world, entity_t entity)
         }
     }
 
+    // dense id 归还到空闲栈：pool_free 会把槽位清零，所以要在它之前读。
+    // 这一步不做，next_dense_id 就会只涨不降，最终把新实体挡在存档之外
+    // （理由见 ecs_create_entity 里那段注释）。
+    ecs_entity_record_t *record =
+        POOL_GET_AS(&world->entities, entity, ecs_entity_record_t);
+    if (record != NULL && record->dense_id < world->config.entity_capacity &&
+        world->dense_free_count < world->config.entity_capacity) {
+        world->dense_free[world->dense_free_count++] = record->dense_id;
+    }
+
     world->dense_dirty = true;
     world->hierarchy_dirty = true;
     return pool_free(&world->entities, entity);
@@ -310,6 +375,9 @@ void ecs_world_clear(ecs_world_t *world)
 
     array_clear(&world->commands);
     world->next_dense_id = 0u;
+    // 水位线归零的同时必须清空空闲号栈：留着旧条目会让同一个 dense 发两次，
+    // 而重复的 dense 进存档就是"两个实体的组件互相覆盖"。
+    world->dense_free_count = 0u;
     world->dense_count = 0u;
     world->dense_dirty = true;
     world->hierarchy_dirty = true;

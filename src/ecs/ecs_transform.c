@@ -302,7 +302,10 @@ void ecs_mark_hierarchy_dirty(ecs_world_t *world)
 
 static void ecs_reset_depth_cache(ecs_world_t *world)
 {
-    const u32 space = pool_capacity(&world->entities);
+    // 界限用 ecs_handle_index_space：它是**取值空间**而不是实体数。
+    // 之前这里是 pool_capacity()，恰好漏掉最后一个槽位，于是那个槽里的堆上垃圾
+    // 会被当成实体的深度直接用 —— 一个 34 亿的"深度"能把层级重排变成事实上的死循环。
+    const u32 space = ecs_handle_index_space(world);
     for (u32 i = 0; i < space; ++i) {
         world->depth_cache[i] = ECS_DEPTH_UNKNOWN;
     }
@@ -351,6 +354,21 @@ bool ecs_rebuild_hierarchy(ecs_world_t *world)
                 world->hierarchy_cycles_rejected++;
                 depth = 0u;
             }
+            world->depth_cache[handle_index(e)] = depth;
+        }
+        // 第二道防线：任何超过配置上限的深度都按无效链处理。
+        //
+        // 缓存里出现垃圾值说明别处有越界（事实上就有过一次：取值空间少算了一项，
+        // 最后一个槽里是堆上垃圾，读出来 34 亿当深度 —— 下面那个
+        // `for (d = 0; d <= max_depth; ++d)` 于是变成事实上的死循环，症状是"示例卡死"）。
+        // 越界已经修了，但**一个坏数据不该有能力把一帧变成十分钟**，
+        // 所以这里宁可把它降级成根节点并计数，也不让循环上界由数据说了算。
+        if (depth > world->config.hierarchy_depth_max) {
+            LOG_ERROR("实体 %u 的深度 %u 超过上限 %u，按根节点处理",
+                      (unsigned)handle_index(e), (unsigned)depth,
+                      (unsigned)world->config.hierarchy_depth_max);
+            world->hierarchy_cycles_rejected++;
+            depth = 0u;
             world->depth_cache[handle_index(e)] = depth;
         }
         if (depth > max_depth) {
