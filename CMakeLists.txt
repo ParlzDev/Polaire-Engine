@@ -150,6 +150,12 @@ add_library(engine STATIC
     src/render/pbr.c
     src/render/shadow.c
     src/render/mesh_file.c
+    # ECS 层（M5）。刻意不含任何 render 头：桥接在 src/scene/。
+    src/ecs/ecs_world.c
+    src/ecs/ecs_component.c
+    src/ecs/ecs_query.c
+    src/ecs/ecs_system.c
+    src/ecs/ecs_transform.c
     # 2D 管线（M3）
     src/render/sprite.c
     src/render/sprite_batch.c

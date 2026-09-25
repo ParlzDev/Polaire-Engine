@@ -47,6 +47,9 @@ int main(int argc, char **argv)
     test_mesh_file_register();
     test_json_register();
 
+    // M5：ECS + 场景
+    test_ecs_register();
+
     const char *filter = (argc > 1) ? argv[1] : NULL;
     const int   result = test_run_all(filter);
 

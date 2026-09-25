@@ -41,4 +41,7 @@ void test_render_target_register(void);
 void test_mesh_file_register(void);
 void test_json_register(void);
 
+// M5：ECS + 场景
+void test_ecs_register(void);
+
 #endif // MYENGINE_TEST_SUITES_H
