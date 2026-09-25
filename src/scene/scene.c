@@ -92,8 +92,8 @@ scene_env_t scene_env_default(void)
 
 scene_t *scene_create(const scene_config_t *config)
 {
-    if (config == NULL || config->allocator == NULL || config->renderer == NULL) {
-        LOG_ERROR("scene_create 需要 allocator 与 renderer");
+    if (config == NULL || config->allocator == NULL) {
+        LOG_ERROR("scene_create 需要 allocator");
         return NULL;
     }
 
@@ -213,6 +213,22 @@ bool scene_register_components(scene_t *scene, scene_component_ids_t *out_ids)
 
 // ---------------------------------------------------------------- 表操作
 
+// 离线模式（scene_create 没给 renderer）只能登记名字与下标 —— 序列化单测就靠它，
+// 那类测试验的是"存出去读回来逐字节一致"，不需要真的画出来。
+// 但"从文件加载资源"必须有 renderer，否则下面每一个 mesh_create_from_* 都会解引用空指针。
+static bool scene_files_loadable(const scene_t *scene, const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        LOG_ERROR("资源加载缺少路径");
+        return false;
+    }
+    if (scene->renderer == NULL) {
+        LOG_ERROR("离线场景不能从文件加载资源：%s（scene_create 未提供 renderer）", path);
+        return false;
+    }
+    return true;
+}
+
 static bool scene_copy_name(char *dst, const char *name, const char *what)
 {
     if (name == NULL || name[0] == '\0') {
@@ -327,7 +343,10 @@ bool scene_add_mesh_handle(scene_t *scene, const char *name, mesh_handle_t mesh,
     if (!scene_copy_name(slot, name, "网格")) {
         return false;
     }
-    if (!mesh_is_valid(scene->renderer, mesh)) {
+    // 离线模式（renderer == NULL）只登记名字与下标，没有 GPU 可以问句柄有效性。
+    // 序列化单测就走这条路：它要验的是"存出去能读回来且逐字节一致"，
+    // 不需要真的画出来。
+    if (scene->renderer != NULL && !mesh_is_valid(scene->renderer, mesh)) {
         LOG_ERROR("登记了一个无效网格句柄：%s", name);
         return false;
     }
@@ -359,8 +378,7 @@ bool scene_add_mesh_handle(scene_t *scene, const char *name, mesh_handle_t mesh,
 bool scene_add_mesh_from_file(scene_t *scene, const char *name, const char *path, u32 *out_id)
 {
     ASSERT(scene != NULL);
-    if (path == NULL || path[0] == '\0') {
-        LOG_ERROR("scene_add_mesh_from_file 缺少路径");
+    if (!scene_files_loadable(scene, path)) {
         return false;
     }
 
@@ -454,7 +472,7 @@ bool scene_add_atlas_handle(scene_t *scene, const char *name, texture_handle_t t
     if (!scene_copy_name(slot, name, "图集")) {
         return false;
     }
-    if (!texture_is_valid(scene->renderer, texture)) {
+    if (scene->renderer != NULL && !texture_is_valid(scene->renderer, texture)) {
         LOG_ERROR("登记了一个无效纹理句柄：%s", name);
         return false;
     }
@@ -486,8 +504,7 @@ bool scene_add_atlas_handle(scene_t *scene, const char *name, texture_handle_t t
 bool scene_add_atlas_from_file(scene_t *scene, const char *name, const char *path, u32 *out_id)
 {
     ASSERT(scene != NULL);
-    if (path == NULL || path[0] == '\0') {
-        LOG_ERROR("scene_add_atlas_from_file 缺少路径");
+    if (!scene_files_loadable(scene, path)) {
         return false;
     }
 

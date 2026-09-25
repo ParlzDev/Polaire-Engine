@@ -97,6 +97,15 @@ entity_t ecs_entity_from_dense(ecs_world_t *world, dense_id_t dense);
 // 重建映射（世界内容变化后调用；世界内部在 flush 时自己维护）。
 void ecs_rebuild_dense_index(ecs_world_t *world);
 
+// 把存活实体按 dense id **升序**填进 out，返回填了多少个。out 为 NULL 时只返回总数
+// （用来先探规模再分配）。max 不够时按 max 截断并记错误 —— 静默丢掉实体是最糟的，
+// 存档会"看起来成功但少了几十个物体"。
+//
+// 为什么专门要这一个：存档与"存→读→再存逐字节一致"这条验收要求写出顺序
+// 与内存布局无关。池的迭代顺序是槽位顺序，组件数组的行顺序在交换式移除后
+// 也不稳定。dense id 是唯一两边都同意、且跨运行可复现的序。
+u32 ecs_collect_entities(ecs_world_t *world, entity_t *out, u32 max);
+
 // ---------------------------------------------------------------- 统计
 typedef struct ecs_world_stats_t {
     u32 entity_capacity;

@@ -76,7 +76,10 @@ scene_env_t scene_env_default(void);
 
 typedef struct scene_config_t {
     allocator_t *allocator;
-    renderer_t  *renderer; // 只为加载资源服务（造网格/纹理）；场景不画东西
+    // 为 NULL 时是**离线模式**：只登记资源名字与下标，不能从文件加载。
+    // 序列化与 prefab 的单元测试走这条路 —— 它们要验的是
+    // "存出去读回来逐字节一致"，不需要真的把画面画出来。
+    renderer_t *renderer;
     const char  *name;
     u32          entity_capacity;      // 0 = 用 ecs 默认
     u32          resource_capacity_per_type; // 每个组件类型的槽位；0 = 默认

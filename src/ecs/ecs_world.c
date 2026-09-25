@@ -387,6 +387,36 @@ entity_t ecs_entity_from_dense(ecs_world_t *world, dense_id_t dense)
     return world->dense_to_entity[dense];
 }
 
+u32 ecs_collect_entities(ecs_world_t *world, entity_t *out, u32 max)
+{
+    if (world == NULL || !world->ready) {
+        return 0u;
+    }
+
+    // 直接走 dense_to_entity：重建之后它天然按 dense 升序，
+    // 于是不需要排序、也不需要临时缓冲。
+    if (world->dense_dirty) {
+        ecs_rebuild_dense_index(world);
+    }
+
+    u32 emitted = 0u;
+    for (u32 dense = 0u; dense < world->dense_count; ++dense) {
+        const entity_t e = world->dense_to_entity[dense];
+        if (!entity_is_valid(e) || !pool_valid(&world->entities, e)) {
+            continue;
+        }
+        if (out != NULL) {
+            if (emitted >= max) {
+                LOG_ERROR("实体数组只装得下 %u 个 —— 结果被截断", max);
+                return emitted;
+            }
+            out[emitted] = e;
+        }
+        emitted++;
+    }
+    return emitted;
+}
+
 // ---------------------------------------------------------------- 统计
 
 void ecs_world_get_stats(const ecs_world_t *world, ecs_world_stats_t *out)
