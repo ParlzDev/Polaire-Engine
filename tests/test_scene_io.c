@@ -182,6 +182,27 @@ static void io_build_scene(scene_io_fixture_t *fx)
 // io_build_scene 写出的组件实例数。
 #define IO_BUILD_COMPONENTS 10u
 
+// 一个"名字 + 相机"的实体，用来做跨 dense 的配对对账（见 dense_holes 那条）。
+static entity_t io_named_camera(ecs_world_t *world, scene_component_ids_t ids, const char *name,
+                                f32 fov)
+{
+    const entity_t e = ecs_create_entity(world);
+    EXPECT_TRUE(ecs_transform_get_or_add(world, e) != NULL);
+    scene_name_t nm;
+    memset(&nm, 0, sizeof(nm));
+    snprintf(nm.text, sizeof(nm.text), "%s", name);
+    EXPECT_NOT_NULL(ecs_add(world, e, ids.name, &nm));
+    scene_camera_t cam;
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = (u32)SCENE_CAMERA_PERSPECTIVE;
+    cam.fov_y_degrees = fov;
+    cam.znear = 0.1f;
+    cam.zfar = 100.0f;
+    cam.active = false;
+    EXPECT_NOT_NULL(ecs_add(world, e, ids.camera, &cam));
+    return e;
+}
+
 static bool io_write(scene_io_fixture_t *fx, arena_t *arena, void **out_bytes, usize *out_size,
                      scene_io_stats_t *out_stats)
 {
@@ -488,6 +509,98 @@ static void scene_io_values_survive(void)
 }
 
 // ---------------------------------------------------------------- 坏输入
+
+// dense 空间有洞是**常态**而不是边角：实体销毁后 id 不回收（只增不减），
+// 所以编辑器里存出来的场景，dense 列一定是 0,1,2,4,6 这种带洞的序列。
+// 读侧必须走"记录 → 文件 dense → 新实体"这条链；拿循环下标当 dense 用，
+// 组件就会挂到隔壁实体上 —— 而且不报错。
+//
+// 顺带钉住一条格式性质：**加载会压实 dense**。所以"逐字节一致"要分两段说 ——
+// 第一次往返可能只有内容一致而 dense 列不同，从第二次起才永远逐字节一致。
+static void scene_io_dense_holes_canonicalize(void)
+{
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "io_hole_a");
+    io_build_scene(&a);
+
+    ecs_world_t *wa = scene_world(a.scene);
+    const entity_t cam1 = io_named_camera(wa, a.ids, "cam1", 11.0f);
+    const entity_t hole = io_named_camera(wa, a.ids, "hole", 66.0f);
+    const entity_t cam2 = io_named_camera(wa, a.ids, "cam2", 22.0f);
+    EXPECT_TRUE(entity_is_valid(cam1) && entity_is_valid(cam2));
+    EXPECT_TRUE(ecs_destroy_entity(wa, hole)); // 中间挖一个洞
+
+    allocator_tracking_t tracker;
+    allocator_tracking_init(&tracker, allocator_heap());
+    arena_t arena;
+    EXPECT_TRUE(arena_init(&arena, &tracker.base, 512u * 1024u, "io_hole_arena"));
+
+    void *x1 = NULL;
+    usize s1 = 0u;
+    scene_io_stats_t w1;
+    EXPECT_TRUE(io_write(&a, &arena, &x1, &s1, &w1));
+    EXPECT_EQ_U64(w1.entities_written, 6u);
+    EXPECT_EQ_U64(w1.components_written, 16u); // 10 + cam1 的 3 个 + cam2 的 3 个
+
+    scene_io_fixture_t b;
+    io_fixture_begin(&b, "io_hole_b");
+    scene_io_stats_t stats;
+    EXPECT_TRUE(scene_read_binary(b.scene, x1, s1, &stats));
+    EXPECT_EQ_U64(stats.entities_loaded, 6u);
+    EXPECT_EQ_U64(stats.components_loaded, 16u);
+    EXPECT_EQ_U64(stats.dangling_refs, 0u);
+
+    // 数据对账：名字和它的相机参数必须还挂在**同一个**实体上。
+    // 这才是这条测试的正题 —— dense 错位的第一症状就是"配对散架"，且不报错。
+    ecs_world_t *wb = scene_world(b.scene);
+    entity_t ents[16];
+    const u32 n = ecs_collect_entities(wb, ents, 16u);
+    EXPECT_EQ_U64(n, 6u);
+    u32 matched = 0u;
+    for (u32 i = 0; i < n; ++i) {
+        const scene_name_t *nm = (const scene_name_t *)ecs_peek(wb, ents[i], b.ids.name);
+        const scene_camera_t *cam = (const scene_camera_t *)ecs_peek(wb, ents[i], b.ids.camera);
+        if (nm == NULL || cam == NULL) {
+            continue;
+        }
+        if (strncmp(nm->text, "cam1", SCENE_NAME_MAX) == 0 &&
+            fabs((double)cam->fov_y_degrees - 11.0) < 1e-6) {
+            matched++;
+        }
+        if (strncmp(nm->text, "cam2", SCENE_NAME_MAX) == 0 &&
+            fabs((double)cam->fov_y_degrees - 22.0) < 1e-6) {
+            matched++;
+        }
+        if (strncmp(nm->text, "hole", SCENE_NAME_MAX) == 0) {
+            TF_CHECK(false, "被销毁的实体竟然还在");
+        }
+    }
+    EXPECT_EQ_U64(matched, 2u);
+
+    void *x2 = NULL;
+    usize s2 = 0u;
+    EXPECT_TRUE(io_write(&b, &arena, &x2, &s2, NULL));
+    EXPECT_EQ_U64(s1, s2); // 压实不改长度，只改 dense 列里的值
+
+    // 再读一次、再写一次，就该和 x2 逐字节相同：规范形从此稳定
+    scene_io_fixture_t c;
+    io_fixture_begin(&c, "io_hole_c");
+    scene_io_stats_t stats3;
+    EXPECT_TRUE(scene_read_binary(c.scene, x2, s2, &stats3));
+    void *x3 = NULL;
+    usize s3 = 0u;
+    EXPECT_TRUE(io_write(&c, &arena, &x3, &s3, NULL));
+    EXPECT_EQ_U64(s2, s3);
+    if (s2 == s3) {
+        EXPECT_TRUE(memcmp(x2, x3, s2) == 0);
+    }
+
+    io_fixture_end(&c);
+    io_fixture_end(&b);
+    io_fixture_end(&a);
+    arena_destroy(&arena);
+    EXPECT_FALSE(allocator_tracking_has_leak(&tracker));
+}
 
 static void scene_io_rejects_bad_header(void)
 {
@@ -836,6 +949,7 @@ void test_scene_io_register(void)
     test_register("scene_io", "empty_scene_roundtrips", scene_io_empty_scene_roundtrips);
     test_register("scene_io", "roundtrip_is_byte_identical", scene_io_roundtrip_is_byte_identical);
     test_register("scene_io", "values_survive_roundtrip", scene_io_values_survive);
+    test_register("scene_io", "dense_holes_canonicalize", scene_io_dense_holes_canonicalize);
     test_register("scene_io", "rejects_bad_header", scene_io_rejects_bad_header);
     test_register("scene_io", "rejects_over_capacity", scene_io_rejects_over_capacity);
     test_register("scene_io", "rejects_registry_mismatch", scene_io_rejects_registry_mismatch);

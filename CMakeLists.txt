@@ -159,6 +159,7 @@ add_library(engine STATIC
     # 场景层（M5）：唯一同时看得见 ecs 与 render 的一层
     src/scene/scene.c
     src/scene/scene_io.c
+    src/scene/prefab.c
     src/scene/ecs_submit.c
     # 2D 管线（M3）
     src/render/sprite.c

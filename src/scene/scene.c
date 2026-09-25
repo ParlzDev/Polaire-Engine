@@ -27,10 +27,17 @@ typedef struct scene_atlas_entry_t {
 } scene_atlas_entry_t;
 
 typedef struct scene_material_entry_t {
-    char        name[SCENE_RESOURCE_NAME_MAX];
-    char        pipeline_name[SCENE_RESOURCE_NAME_MAX];
-    material_t  material;
-    bool        used;
+    char       name[SCENE_RESOURCE_NAME_MAX];
+    char       pipeline_name[SCENE_RESOURCE_NAME_MAX];
+    material_t material;
+    // 每个槽位挂的是**资源表下标**，不是句柄。
+    //
+    // material_t.textures[] 里存的已经是 GPU 句柄，那是"这一次运行"的产物，
+    // 存进存档下次读出来指向的就是别的东西（而且读得出来，只是贴错了图）。
+    // 所以下标必须另外记一份，存档走名字，加载时再解析回句柄。
+    // 少记这一份的话症状是"存了再读，所有材质都没贴图了"，且不报错。
+    u32 atlas_ids[RENDER_MAX_TEXTURE_SLOTS];
+    bool used;
 } scene_material_entry_t;
 
 typedef struct scene_pipeline_entry_t {
@@ -651,6 +658,10 @@ bool scene_add_material(scene_t *scene, const char *name, const char *pipeline_n
             scene_copy_name(scene->materials[i].pipeline_name, pipeline_name, "管线索引用");
             scene->materials[i].material = *material;
             scene->materials[i].material.pipeline = pipeline;
+            // 必须显式填 NONE：整张表是 memset(0) 出来的，0 是一个**合法的**图集下标。
+            for (u32 s = 0u; s < RENDER_MAX_TEXTURE_SLOTS; ++s) {
+                scene->materials[i].atlas_ids[s] = SCENE_RESOURCE_NONE;
+            }
             if (out_id != NULL) {
                 *out_id = i;
             }
@@ -668,9 +679,27 @@ bool scene_material_set_atlas(scene_t *scene, u32 material_id, u32 slot, u32 atl
                   (unsigned)atlas_id);
         return false;
     }
+    if (slot >= RENDER_MAX_TEXTURE_SLOTS) {
+        LOG_ERROR("给材质挂图集失败：槽位 %u 超出 %u", (unsigned)slot,
+                  (unsigned)RENDER_MAX_TEXTURE_SLOTS);
+        return false;
+    }
+    // 下标先记，句柄后解析：下标是"这个材质第几槽用了哪张图"的**唯一**长期记录。
+    // 只往 material_t 里塞句柄的话，存档再也问不回来，
+    // 症状是"存了再读，贴图全没了"且不报错。
+    scene->materials[material_id].atlas_ids[slot] = atlas_id;
     material_t *m = &scene->materials[material_id].material;
     material_set_texture(m, slot, scene->atlases[atlas_id].handle, NULL);
     return true;
+}
+
+u32 scene_material_atlas(const scene_t *scene, u32 material_id, u32 slot)
+{
+    if (scene == NULL || !scene_material_id_valid(scene, material_id) ||
+        slot >= RENDER_MAX_TEXTURE_SLOTS) {
+        return SCENE_RESOURCE_NONE;
+    }
+    return scene->materials[material_id].atlas_ids[slot];
 }
 
 u32 scene_find_material(const scene_t *scene, const char *name)

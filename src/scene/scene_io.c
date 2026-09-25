@@ -27,7 +27,31 @@ typedef struct scene_io_ctx_t {
     const entity_t  *dense_map; // 下标 = 文件里的 dense id；写侧为 NULL
     u32              dense_count;
     scene_io_stats_t *stats;
+
+    // 写侧专用：非 NULL 表示这份存档只覆盖这一段实体（预制体），
+    // 数组下标就是它们在文件里的 dense id。
+    const entity_t *scope;
+    u32            scope_count;
 } scene_io_ctx_t;
+
+// 一个实体在这份存档里的 dense id。
+static u32 scene_io_write_dense(const scene_io_ctx_t *ctx, entity_t e)
+{
+    if (ctx->scope == NULL) {
+        return (u32)ecs_entity_to_dense(ctx->world, e);
+    }
+    // 预制体必须**重新编号**：原场景里的 dense id 到了目标场景毫无意义，
+    // 而且会把"这份存档只属于那个场景"这件事写进格式里。
+    // 找不到 = 引用了子树外的实体，一律变 NONE —— 预制体不许偷偷依赖子树外
+    // 的东西，否则实例化后那个引用指向的是目标场景里**别人的**实体，
+    // 那是最难查的一类错（表现是"这盏灯跟着别的物体走"）。
+    for (u32 i = 0u; i < ctx->scope_count; ++i) {
+        if (ctx->scope[i] == e) {
+            return i;
+        }
+    }
+    return (u32)ECS_DENSE_NONE;
+}
 
 // 一种字段在**文件里**占多少字节。
 //
@@ -161,7 +185,7 @@ static bool bin_write_field(bio_writer_t *w, ecs_field_kind_t kind, const void *
     case ECS_FIELD_U8: return bio_write_u8(w, *(const u8 *)p);
     case ECS_FIELD_BOOL: return bio_write_u8(w, *(const bool *)p ? 1u : 0u);
     case ECS_FIELD_ENTITY:
-        return bio_write_u32(w, (u32)ecs_entity_to_dense(ctx->world, *(const entity_t *)p));
+        return bio_write_u32(w, scene_io_write_dense(ctx, *(const entity_t *)p));
     case ECS_FIELD_VEC2: {
         const vec2_t *v = (const vec2_t *)p;
         return bio_write_f32(w, v->x) && bio_write_f32(w, v->y);
@@ -396,8 +420,16 @@ static const ecs_component_desc_t k_resource_desc = {
 };
 
 typedef struct scene_io_material_t {
-    char   name[SCENE_RESOURCE_NAME_MAX];
-    char   pipeline[SCENE_RESOURCE_NAME_MAX];
+    char name[SCENE_RESOURCE_NAME_MAX];
+    char pipeline[SCENE_RESOURCE_NAME_MAX];
+    // 每个槽位一个图集名（空串 = 该槽位没挂）。
+    //
+    // 8 槽 × 64 字节 = 512 字节/材质，材质表上限 64 → 最坏多占 32KB。
+    // 这里选"定长、整块读写"而不是"槽数 + 变长"，是为了让这一条记录仍然
+    // 能被那**一套**定长遍历处理（变长就要给格式加第二套读法，
+    // 而"跳过不认识的组件"依赖的正是尺寸可纯从表算出）。
+    // 真要瘦身，等 M11 有实测数据再换，不在这里先设计后需求。
+    char atlases[RENDER_MAX_TEXTURE_SLOTS][SCENE_RESOURCE_NAME_MAX];
     vec4_t tint;
     vec4_t pbr;
     vec4_t emissive;
@@ -406,6 +438,7 @@ typedef struct scene_io_material_t {
 static const ecs_field_desc_t k_material_fields[] = {
     IO_FIELD_STR("name", scene_io_material_t, name),
     IO_FIELD_STR("pipeline", scene_io_material_t, pipeline),
+    IO_FIELD_STR("atlases", scene_io_material_t, atlases),
     IO_FIELD("tint", scene_io_material_t, tint, ECS_FIELD_VEC4),
     IO_FIELD("pbr", scene_io_material_t, pbr, ECS_FIELD_VEC4),
     IO_FIELD("emissive", scene_io_material_t, emissive, ECS_FIELD_VEC4),
@@ -473,6 +506,13 @@ static scene_io_material_t scene_io_material_record(scene_t *scene, u32 id)
              (scene_material_pipeline(scene, id) != NULL)
                  ? scene_material_pipeline(scene, id)
                  : "");
+    for (u32 slot = 0u; slot < RENDER_MAX_TEXTURE_SLOTS; ++slot) {
+        const u32 atlas = scene_material_atlas(scene, id, slot);
+        const char *atlas_name = (atlas != (u32)SCENE_RESOURCE_NONE)
+                                     ? scene_atlas_name(scene, atlas)
+                                     : NULL;
+        snprintf(m.atlases[slot], SCENE_RESOURCE_NAME_MAX, "%s", (atlas_name != NULL) ? atlas_name : "");
+    }
     const material_t *mat = scene_material(scene, id);
     if (mat != NULL) {
         m.tint = mat->tint;
@@ -485,10 +525,217 @@ static scene_io_material_t scene_io_material_record(scene_t *scene, u32 id)
 // 一次写出的实体上限。超过就是要换分块存档 —— 报错而不是静默截断。
 #define SCENE_IO_MAX_ENTITIES_PER_FILE 65536u
 
+bool scene_archive_peek(const void *bytes, usize size, u32 *out_entities, u32 *out_kind)
+{
+    if (out_entities != NULL) {
+        *out_entities = 0u;
+    }
+    if (out_kind != NULL) {
+        *out_kind = 0u;
+    }
+    if (bytes == NULL || size < SCENE_FILE_HEADER_SIZE) {
+        return false;
+    }
+
+    // 按 [下标] 走，不写偏移常量：偏移只在这一个文件里有意义（见头文件里的布局表）。
+    bio_reader_t r;
+    bio_reader_init(&r, bytes, size);
+    u32 word = 0u;
+    if (!bio_read_u32(&r, &word) || word != SCENE_FILE_MAGIC) {
+        return false;
+    }
+    if (!bio_read_u32(&r, &word) || word != SCENE_FILE_VERSION) {
+        return false;
+    }
+    if (!bio_skip(&r, 4u)) { // [2] 注册表哈希
+        return false;
+    }
+    u32 entities = 0u;
+    if (!bio_read_u32(&r, &entities)) { // [3] 实体数
+        return false;
+    }
+    if (!bio_skip(&r, 16u)) { // [4]..[7] 四个计数
+        return false;
+    }
+    u32 kind = 0u;
+    if (!bio_read_u32(&r, &kind)) { // [8] 存档种类
+        return false;
+    }
+    if (out_entities != NULL) {
+        *out_entities = entities;
+    }
+    if (out_kind != NULL) {
+        *out_kind = kind;
+    }
+    return true;
+}
+
+// ============================================================ 存档范围（预制体）
+// 一份预制体只需要"它引用到的那些资源"，不是源场景的整张资源表。
+// 三张位图按资源类型分开存（256 字节，栈上放得下，也不引入全局状态）。
+typedef struct scene_io_ref_mark_t {
+    bool mesh[SCENE_MAX_MESHES];
+    bool atlas[SCENE_MAX_ATLASES];
+    bool material[SCENE_MAX_MATERIALS];
+} scene_io_ref_mark_t;
+
+static void scene_io_mark_component(const ecs_component_desc_t *d, const void *comp,
+                                    scene_io_ref_mark_t *mark)
+{
+    for (u32 i = 0; i < d->field_count; ++i) {
+        const ecs_field_desc_t *f = &d->fields[i];
+        if (f->kind != ECS_FIELD_MESH_REF && f->kind != ECS_FIELD_ATLAS_REF &&
+            f->kind != ECS_FIELD_MATERIAL_REF) {
+            continue;
+        }
+        const u32 index = *(const u32 *)((const u8 *)comp + f->offset);
+        if (index == (u32)SCENE_RESOURCE_NONE) {
+            continue;
+        }
+        // 越界的下标不标记也不报错：写出的名字会是空串，
+        // 那条路径上 dangling_refs 已经计过一次了，这里再吵就是重复。
+        switch (f->kind) {
+        case ECS_FIELD_MESH_REF:
+            if (index < SCENE_MAX_MESHES) {
+                mark->mesh[index] = true;
+            }
+            break;
+        case ECS_FIELD_ATLAS_REF:
+            if (index < SCENE_MAX_ATLASES) {
+                mark->atlas[index] = true;
+            }
+            break;
+        default:
+            if (index < SCENE_MAX_MATERIALS) {
+                mark->material[index] = true;
+            }
+            break;
+        }
+    }
+}
+
+// 材质 → 图集是第二层依赖，必须跟着标：漏了它的话，
+// "实例化一个带贴图的炮塔"会写出一个引用了不存在图集的存档。
+static void scene_io_mark_material_deps(const scene_t *scene, scene_io_ref_mark_t *mark)
+{
+    for (u32 m = 0u; m < SCENE_MAX_MATERIALS; ++m) {
+        if (!mark->material[m]) {
+            continue;
+        }
+        for (u32 slot = 0u; slot < RENDER_MAX_TEXTURE_SLOTS; ++slot) {
+            const u32 atlas = scene_material_atlas(scene, m, slot);
+            if (atlas != (u32)SCENE_RESOURCE_NONE && atlas < SCENE_MAX_ATLASES) {
+                mark->atlas[atlas] = true;
+            }
+        }
+    }
+}
+
+// root 及其所有后代，按"父在子前、兄弟按 dense 升序"输出（out[0] 一定是 root）。
+//
+// 不用递归：递归深度由数据决定，编辑器里手滑拖出一条十万层的链就是把栈打穿 ——
+// 和 ecs_rebuild_hierarchy 同一个理由，这里同样改成显式栈。
+// 也不用"每层扫一遍全部实体"：那是 O(实体数 × 深度)，一条长链就能让存盘变成分钟级。
+// 这里先做一次计数排序建立 children 索引（3 趟 O(n)），再走一遍子树。
+static u32 collect_subtree(ecs_world_t *world, const entity_t *all, u32 all_count, u32 capacity,
+                           entity_t root, entity_t *out, u32 out_max, arena_t *arena)
+{
+    if (!entity_is_valid(root) || out == NULL || out_max == 0u) {
+        return 0u;
+    }
+
+    u32 *child_start = ARENA_NEW_ARRAY(arena, u32, capacity + 2u);
+    u32 *child_cursor = ARENA_NEW_ARRAY(arena, u32, capacity + 1u);
+    u32 *child_list = ARENA_NEW_ARRAY(arena, u32, all_count + 1u);
+    u32 *stack = ARENA_NEW_ARRAY(arena, u32, all_count + 1u);
+    if (child_start == NULL || child_cursor == NULL || child_list == NULL || stack == NULL) {
+        LOG_ERROR("子树遍历的临时数组分配失败（%u 个实体）", (unsigned)all_count);
+        return 0u;
+    }
+
+    // dense id -> 在 all[] 里的下标（+1，0 表示"这个 dense 没有实体"）
+    u32 *pos_of_dense = ARENA_NEW_ARRAY(arena, u32, capacity + 1u);
+    if (pos_of_dense == NULL) {
+        LOG_ERROR("子树遍历的 dense 索引分配失败");
+        return 0u;
+    }
+    for (u32 i = 0u; i < all_count; ++i) {
+        const dense_id_t d = ecs_entity_to_dense(world, all[i]);
+        if (d < capacity) {
+            pos_of_dense[d] = i + 1u;
+        }
+    }
+
+    // 1) 数每个父有几个孩子
+    for (u32 i = 0u; i < all_count; ++i) {
+        const entity_t p = ecs_get_parent(world, all[i]);
+        if (!entity_is_valid(p)) {
+            continue;
+        }
+        const dense_id_t pd = ecs_entity_to_dense(world, p);
+        if (pd < capacity) {
+            child_start[pd + 1u]++;
+        }
+    }
+    // 2) 前缀和 -> 每个父的孩子区间起点
+    for (u32 i = 0u; i < capacity; ++i) {
+        child_start[i + 1u] += child_start[i];
+    }
+    // 3) 按 dense 升序投放，于是每个区间内部天然有序（确定性 = 存档可逐字节比对）
+    memcpy(child_cursor, child_start, (usize)(capacity + 1u) * sizeof(u32));
+    for (u32 i = 0u; i < all_count; ++i) {
+        const entity_t p = ecs_get_parent(world, all[i]);
+        if (!entity_is_valid(p)) {
+            continue;
+        }
+        const dense_id_t pd = ecs_entity_to_dense(world, p);
+        if (pd < capacity) {
+            child_list[child_cursor[pd]++] = i;
+        }
+    }
+
+    const dense_id_t root_dense = ecs_entity_to_dense(world, root);
+    if (root_dense >= capacity) {
+        LOG_ERROR("预制体根实体不在这个世界里");
+        return 0u;
+    }
+
+    u32 emitted = 0u;
+    u32 top = 0u;
+    stack[top++] = root_dense;
+    while (top > 0u) {
+        const u32 dense = stack[--top];
+        const u32 pos = pos_of_dense[dense];
+        if (pos == 0u) {
+            continue; // 这个 dense 上没有活实体（正常不该发生，发生就是索引错了）
+        }
+        if (emitted >= out_max) {
+            LOG_ERROR("子树超过 %u 个实体，容量不足", (unsigned)out_max);
+            return 0u;
+        }
+        out[emitted++] = all[pos - 1u];
+
+        // 逆序压栈，弹出来就是 dense 升序
+        const u32 begin = child_start[dense];
+        const u32 end = child_start[dense + 1u];
+        for (u32 c = end; c > begin; --c) {
+            const u32 child_pos = child_list[c - 1u];
+            const dense_id_t cd = ecs_entity_to_dense(world, all[child_pos]);
+            if (cd < capacity) {
+                stack[top++] = cd;
+            }
+        }
+    }
+    return emitted;
+}
+
 // ============================================================ 写出
 
-bool scene_write_binary(scene_t *scene, arena_t *arena, void **out_bytes, usize *out_size,
-                       scene_io_stats_t *out_stats)
+// 一份存档 = 环境块 + 资源表 + 一段实体。
+// "一段实体"可以是整个世界（scope == NULL），也可以是场景里的一个子树（预制体）——
+// 同一套代码，因为两者需要的翻译只有一处不同：dense id 从哪来。
+static bool write_archive(scene_t *scene, const entity_t *scope, u32 scope_count, arena_t *arena,
+                          void **out_bytes, usize *out_size, scene_io_stats_t *out_stats)
 {
     ASSERT(scene != NULL && arena != NULL);
     if (out_bytes != NULL) {
@@ -505,29 +752,69 @@ bool scene_write_binary(scene_t *scene, arena_t *arena, void **out_bytes, usize 
     ctx.scene = scene;
     ctx.world = scene_world(scene);
     ctx.stats = &stats;
+    ctx.scope = scope;
+    ctx.scope_count = scope_count;
 
     ecs_component_id types[ECS_MAX_COMPONENTS];
     const u32 type_count = scene_serializable_types(&ctx, types, ECS_MAX_COMPONENTS);
-    const u32 mesh_count = scene_mesh_count(scene);
-    const u32 atlas_count = scene_atlas_count(scene);
-    const u32 material_count = scene_material_count(scene);
 
-    const u32 want = ecs_collect_entities(ctx.world, NULL, 0u);
-    if (want > SCENE_IO_MAX_ENTITIES_PER_FILE) {
-        LOG_ERROR("实体数 %u 超过单文件上限 %u", (unsigned)want,
-                  (unsigned)SCENE_IO_MAX_ENTITIES_PER_FILE);
-        return false;
+    // 整场景写**整张**资源表；预制体只写它引用到的那几条。
+    // 少了这个过滤，"实例化一个炮塔"会把源场景的 200 个网格名一并灌进目标场景，
+    // 而资源表上限是 128 —— 第三次实例化就直接失败，且失败原因看着像"表满了"。
+    const u32 mesh_total = scene_mesh_count(scene);
+    const u32 atlas_total = scene_atlas_count(scene);
+    const u32 material_total = scene_material_count(scene);
+    scene_io_ref_mark_t mark;
+    memset(&mark, 0, sizeof(mark));
+    u32 mesh_count = mesh_total, atlas_count = atlas_total, material_count = material_total;
+    if (scope != NULL) {
+        for (u32 i = 0u; i < scope_count; ++i) {
+            for (u32 t = 0u; t < type_count; ++t) {
+                const void *comp = ecs_peek(ctx.world, scope[i], types[t]);
+                if (comp != NULL) {
+                    scene_io_mark_component(ecs_component_desc(ctx.world, types[t]), comp, &mark);
+                }
+            }
+        }
+        scene_io_mark_material_deps(scene, &mark);
+        mesh_count = 0u;
+        atlas_count = 0u;
+        material_count = 0u;
+        for (u32 i = 0u; i < mesh_total; ++i) {
+            mesh_count += mark.mesh[i] ? 1u : 0u;
+        }
+        for (u32 i = 0u; i < atlas_total; ++i) {
+            atlas_count += mark.atlas[i] ? 1u : 0u;
+        }
+        for (u32 i = 0u; i < material_total; ++i) {
+            material_count += mark.material[i] ? 1u : 0u;
+        }
     }
 
     // 实体列表从 arena 拿，不用 static 数组：
     // static 就是可变全局状态（违反"引擎可多实例、无全局状态"），
     // 而且上限 65536 时那是白给的 256KB 常驻内存。
-    entity_t *ents = ARENA_NEW_ARRAY(arena, entity_t, want + 1u);
-    if (ents == NULL) {
-        LOG_ERROR("实体列表分配失败（%u 个）", (unsigned)want);
+    const entity_t *ents = scope;
+    u32 ent_count = scope_count;
+    if (scope == NULL) {
+        const u32 want = ecs_collect_entities(ctx.world, NULL, 0u);
+        if (want > SCENE_IO_MAX_ENTITIES_PER_FILE) {
+            LOG_ERROR("实体数 %u 超过单文件上限 %u", (unsigned)want,
+                      (unsigned)SCENE_IO_MAX_ENTITIES_PER_FILE);
+            return false;
+        }
+        entity_t *collected = ARENA_NEW_ARRAY(arena, entity_t, want + 1u);
+        if (collected == NULL) {
+            LOG_ERROR("实体列表分配失败（%u 个）", (unsigned)want);
+            return false;
+        }
+        ent_count = ecs_collect_entities(ctx.world, collected, want);
+        ents = collected;
+    } else if (ent_count > SCENE_IO_MAX_ENTITIES_PER_FILE) {
+        LOG_ERROR("子树 %u 个实体超过单文件上限 %u", (unsigned)ent_count,
+                  (unsigned)SCENE_IO_MAX_ENTITIES_PER_FILE);
         return false;
     }
-    const u32 ent_count = ecs_collect_entities(ctx.world, ents, want);
 
     // 先量一遍总长度：一次分配、一次写入，不给"边写边扩容"留机会，
     // 也让末尾那句"长度是否吻合"成为一次真正的自检。
@@ -571,18 +858,30 @@ bool scene_write_binary(scene_t *scene, arena_t *arena, void **out_bytes, usize 
         return false;
     }
 
+    // 头部的 kind/root_dense：预制体存档写了子树，[0] 就是它的根，读侧要能把这个
+    // 实体交回给调用方（否则实例化完不知道该把这一坨挂到哪个节点下）。
+    // 整场景没有"根"这个概念，写 NONE。
+    const bool is_prefab = (scope != NULL);
+    const u32 root_dense = is_prefab ? 0u : (u32)ECS_DENSE_NONE;
     bio_writer_t w;
     bio_writer_init(&w, buffer, total);
     bool ok = bio_write_u32(&w, SCENE_FILE_MAGIC) && bio_write_u32(&w, SCENE_FILE_VERSION) &&
               bio_write_u32(&w, scene_registry_hash(scene)) && bio_write_u32(&w, ent_count) &&
               bio_write_u32(&w, mesh_count) && bio_write_u32(&w, atlas_count) &&
               bio_write_u32(&w, material_count) && bio_write_u32(&w, type_count) &&
+              bio_write_u32(&w, is_prefab ? (u32)SCENE_ARCHIVE_PREFAB : (u32)SCENE_ARCHIVE_SCENE) &&
+              bio_write_u32(&w, root_dense) &&
               bio_write_zeros(&w, SCENE_FILE_HEADER_SIZE - bio_writer_used(&w));
     if (!ok) {
         return false;
     }
 
-    ok = bin_write_record(&w, &k_env_desc, scene_environment(scene), &ctx);
+    // 环境块：预制体没有"环境"这个概念，但这一段字节必须还在（段偏移只有一套）。
+    // 写默认值而不是源场景的实际环境 —— 读侧本来就不应用它，
+    // 万一哪天有人手工拼这份存档，看到默认值也不会以为"这个炮塔自带一套雾效"。
+    const scene_env_t prefab_env = scene_env_default();
+    ok = bin_write_record(&w, &k_env_desc, is_prefab ? &prefab_env : scene_environment(scene),
+                          &ctx);
     if (!ok) {
         return false;
     }
@@ -598,21 +897,32 @@ bool scene_write_binary(scene_t *scene, arena_t *arena, void **out_bytes, usize 
         }
     }
 
-    for (u32 i = 0; i < mesh_count; ++i) {
+    // 三段资源：整场景按表顺序全写；预制体只写被标到的那几条（顺序仍然是表顺序，
+    // 于是同一份场景导出两次必然得到相同字节 —— 逐字节比对的测试靠这一点）。
+    for (u32 i = 0u; i < mesh_total; ++i) {
+        if (is_prefab && !mark.mesh[i]) {
+            continue;
+        }
         scene_io_resource_t r = scene_io_resource_record(scene_mesh_name(scene, i),
                                                         scene_mesh_path(scene, i));
         if (!bin_write_record(&w, &k_resource_desc, &r, &ctx)) {
             return false;
         }
     }
-    for (u32 i = 0; i < atlas_count; ++i) {
+    for (u32 i = 0u; i < atlas_total; ++i) {
+        if (is_prefab && !mark.atlas[i]) {
+            continue;
+        }
         scene_io_resource_t r = scene_io_resource_record(scene_atlas_name(scene, i),
                                                         scene_atlas_path(scene, i));
         if (!bin_write_record(&w, &k_resource_desc, &r, &ctx)) {
             return false;
         }
     }
-    for (u32 i = 0; i < material_count; ++i) {
+    for (u32 i = 0u; i < material_total; ++i) {
+        if (is_prefab && !mark.material[i]) {
+            continue;
+        }
         scene_io_material_t m = scene_io_material_record(scene, i);
         if (!bin_write_record(&w, &k_material_desc, &m, &ctx)) {
             return false;
@@ -633,11 +943,12 @@ bool scene_write_binary(scene_t *scene, arena_t *arena, void **out_bytes, usize 
                 present++;
             }
         }
-        const u32 pd = (parent == ENTITY_NONE)
-                           ? (u32)ECS_DENSE_NONE
-                           : (u32)ecs_entity_to_dense(ctx.world, parent);
-        if (!bio_write_u32(&w, (u32)ecs_entity_to_dense(ctx.world, e)) ||
-            !bio_write_u32(&w, pd) || !bio_write_u32(&w, present)) {
+        // 两处 dense 都要过 scene_io_write_dense：预制体模式下它们是"子树内重新编号"，
+        // 直接拿世界的 dense 就把"这份存档属于那个场景"写进格式里了。
+        const u32 self_dense = scene_io_write_dense(&ctx, e);
+        const u32 pd = scene_io_write_dense(&ctx, parent);
+        if (!bio_write_u32(&w, self_dense) || !bio_write_u32(&w, pd) ||
+            !bio_write_u32(&w, present)) {
             return false;
         }
     }
@@ -696,6 +1007,56 @@ bool scene_write_binary(scene_t *scene, arena_t *arena, void **out_bytes, usize 
     return true;
 }
 
+bool scene_write_binary(scene_t *scene, arena_t *arena, void **out_bytes, usize *out_size,
+                        scene_io_stats_t *out_stats)
+{
+    return write_archive(scene, NULL, 0u, arena, out_bytes, out_size, out_stats);
+}
+
+bool scene_write_prefab(scene_t *scene, entity_t root, arena_t *arena, void **out_bytes,
+                        usize *out_size, scene_io_stats_t *out_stats)
+{
+    ASSERT(scene != NULL && arena != NULL);
+    if (out_bytes != NULL) {
+        *out_bytes = NULL;
+    }
+    if (out_size != NULL) {
+        *out_size = 0u;
+    }
+    if (!entity_is_valid(root)) {
+        LOG_ERROR("预制体的根实体无效");
+        return false;
+    }
+
+    // 临时内存全走调用方给的 arena，用完由调用方整体丢弃。
+    // 量级要说清楚：建 children 索引要 5 个按 dense 编号的 u32 数组，
+    // 于是 65536 实体的场景导出一次约需 1.3MB。这是**加载期**开销，
+    // 不进帧内 —— 但如果哪天要在帧内导出，就得换成按 dense_count 收紧的索引。
+    ecs_world_t *world = scene_world(scene);
+    ecs_world_stats_t wstats;
+    ecs_world_get_stats(world, &wstats);
+
+    const u32 want = ecs_collect_entities(world, NULL, 0u);
+    if (want > SCENE_IO_MAX_ENTITIES_PER_FILE) {
+        LOG_ERROR("实体数 %u 超过单文件上限 %u", (unsigned)want,
+                  (unsigned)SCENE_IO_MAX_ENTITIES_PER_FILE);
+        return false;
+    }
+    entity_t *all = ARENA_NEW_ARRAY(arena, entity_t, want + 1u);
+    entity_t *sub = ARENA_NEW_ARRAY(arena, entity_t, want + 1u);
+    if (all == NULL || sub == NULL) {
+        LOG_ERROR("预制体的实体列表分配失败（%u 个）", (unsigned)want);
+        return false;
+    }
+    const u32 all_count = ecs_collect_entities(world, all, want);
+    const u32 sub_count = collect_subtree(world, all, all_count, wstats.entity_capacity, root, sub,
+                                          want, arena);
+    if (sub_count == 0u) {
+        return false; // collect_subtree 已经说明为什么是 0 了
+    }
+    return write_archive(scene, sub, sub_count, arena, out_bytes, out_size, out_stats);
+}
+
 // ============================================================ 读入
 
 // 读一段"结构数组"：每条都是一张字段表描述的定长记录。
@@ -750,17 +1111,38 @@ static bool bin_read_material_section(bio_reader_t *r, scene_t *scene, u32 count
             LOG_ERROR("材质 %s 加载失败（管线 %s 未登记？）", m.name, m.pipeline);
             return false;
         }
+        // 贴图槽位要在材质进表之后再挂：挂的是"表下标 → 表下标"的关系。
+        // 图集排在材质前面读，所以这里查得到；查不到就是存档里引用了一个
+        // 不存在的图集名 —— 计数并跳过这个槽位，不毁掉整个材质。
+        for (u32 slot = 0u; slot < RENDER_MAX_TEXTURE_SLOTS; ++slot) {
+            if (m.atlases[slot][0] == '\0') {
+                continue;
+            }
+            const u32 atlas = scene_find_atlas(scene, m.atlases[slot]);
+            if (atlas == (u32)SCENE_RESOURCE_NONE) {
+                ctx->stats->dangling_refs++;
+                continue;
+            }
+            if (!scene_material_set_atlas(scene, id, slot, atlas)) {
+                ctx->stats->dangling_refs++;
+            }
+        }
         ctx->stats->resources_loaded++;
     }
     return true;
 }
 
-bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_stats_t *out_stats)
+// 存档的读实现。公开的两个入口只在这上面套了一层 scratch arena 的 mark/rewind。
+static bool read_archive(scene_t *scene, const void *bytes, usize size,
+                         scene_io_stats_t *out_stats, entity_t *out_root)
 {
     ASSERT(scene != NULL);
 
     scene_io_stats_t stats;
     memset(&stats, 0, sizeof(stats));
+    if (out_root != NULL) {
+        *out_root = ENTITY_NONE;
+    }
 
     if (bytes == NULL || size < SCENE_FILE_HEADER_SIZE) {
         LOG_ERROR("场景存档太小：%llu 字节", (unsigned long long)size);
@@ -772,10 +1154,12 @@ bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_s
 
     u32 magic = 0u, version = 0u, hash = 0u;
     u32 ent_count = 0u, mesh_count = 0u, atlas_count = 0u, material_count = 0u, type_count = 0u;
+    u32 kind = 0u, root_dense = 0u;
     if (!bio_read_u32(&r, &magic) || !bio_read_u32(&r, &version) || !bio_read_u32(&r, &hash) ||
         !bio_read_u32(&r, &ent_count) || !bio_read_u32(&r, &mesh_count) ||
         !bio_read_u32(&r, &atlas_count) || !bio_read_u32(&r, &material_count) ||
-        !bio_read_u32(&r, &type_count)) {
+        !bio_read_u32(&r, &type_count) || !bio_read_u32(&r, &kind) ||
+        !bio_read_u32(&r, &root_dense)) {
         LOG_ERROR("场景存档头部不完整");
         return false;
     }
@@ -788,7 +1172,25 @@ bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_s
                   (unsigned)SCENE_FILE_VERSION);
         return false;
     }
-    (void)bio_skip(&r, SCENE_FILE_HEADER_SIZE - bio_reader_pos(&r));
+    if (kind >= (u32)SCENE_ARCHIVE_KIND_COUNT) {
+        LOG_ERROR("存档种类未知：%u（这个构建最多认到 %u）", (unsigned)kind,
+                  (unsigned)(SCENE_ARCHIVE_KIND_COUNT - 1u));
+        return false;
+    }
+    const bool is_prefab = (kind == (u32)SCENE_ARCHIVE_PREFAB);
+    // kind 和 root_dense 必须自洽：说自己是预制体却没有有效的根，或者
+    // 说自己是整场景却指向一个根，都是"这份文件被改坏了一半"。
+    // 这时后面每个决定（要不要应用环境、要不要重映射 dense）都建立在
+    // 一个自相矛盾的输入上，所以在这里就拒掉。
+    if (is_prefab ? (root_dense >= ent_count) : (root_dense != (u32)ECS_DENSE_NONE)) {
+        LOG_ERROR("存档的 kind=%u 与根实体 dense %u 不自洽（实体数 %u）", (unsigned)kind,
+                  (unsigned)root_dense, (unsigned)ent_count);
+        return false;
+    }
+    if (!bio_skip(&r, SCENE_FILE_HEADER_SIZE - bio_reader_pos(&r))) {
+        LOG_ERROR("场景存档头部不完整（保留段读不到末尾）");
+        return false;
+    }
 
     ecs_world_t *world = scene_world(scene);
     if (hash != scene_registry_hash(scene)) {
@@ -813,6 +1215,8 @@ bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_s
         return false;
     }
 
+    // 环境块**总是**要读（它在流的中间，跳不过去），但预制体不应用它：
+    // 预制体里的环境是导出那一刻源场景的状态，不是这份资产的内容。
     scene_env_t env = *scene_environment(scene);
     scene_io_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -886,8 +1290,10 @@ bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_s
     u32 *parent_dense = (u32 *)arena_alloc(scene_scratch_arena(scene),
                                            (usize)(ent_count + 1u) * sizeof(u32));
     u32 *comp_counts = (u32 *)arena_alloc(scene_scratch_arena(scene),
+                                          (usize)(ent_count + 1u) * sizeof(u32));
+    u32 *record_dense = (u32 *)arena_alloc(scene_scratch_arena(scene),
                                            (usize)(ent_count + 1u) * sizeof(u32));
-    if (parent_dense == NULL || comp_counts == NULL) {
+    if (parent_dense == NULL || comp_counts == NULL || record_dense == NULL) {
         return false;
     }
 
@@ -902,6 +1308,12 @@ bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_s
                       (unsigned)wstats.entity_capacity);
             return false;
         }
+        if (entity_is_valid(dense_map[dense])) {
+            // 两条记录声称自己是同一个 dense id：后面那条会把前面那条的组件
+            // 挂到一个说不清的实体上。这种文件不是"旧版本"，是被改坏了。
+            LOG_ERROR("存档里 dense id %u 出现了两次 —— 文件被改坏了", (unsigned)dense);
+            return false;
+        }
         const entity_t e = ecs_create_entity(world);
         if (!entity_is_valid(e)) {
             LOG_ERROR("实体数超过世界容量 %u（存档需要 %u）", (unsigned)wstats.entity_capacity,
@@ -911,6 +1323,7 @@ bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_s
         dense_map[dense] = e;
         parent_dense[i] = parent;
         comp_counts[i] = comps;
+        record_dense[i] = dense;
         if (dense + 1u > max_dense) {
             max_dense = (dense_id_t)(dense + 1u);
         }
@@ -928,7 +1341,16 @@ bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_s
         return false;
     }
     for (u32 i = 0; i < ent_count; ++i) {
-        const entity_t self = dense_map[i];
+        // 注意这里过的是**记录→dense→实体**，不是直接用 i 当 dense：
+        // 一个跑过销毁实体再存盘的场景，dense 空间是有洞的（不连续），
+        // 拿循环下标去查就会把第 i 条记录挂到错的实体上 —— 表现是
+        // "组件串门"，而且不报错。
+        const entity_t self = dense_map[record_dense[i]];
+        if (!entity_is_valid(self)) {
+            LOG_ERROR("第 %u 条实体记录找不到对应的实体（dense %u）", (unsigned)i,
+                      (unsigned)record_dense[i]);
+            return false;
+        }
         for (u32 c = 0; c < comp_counts[i]; ++c) {
             u32 type_index = 0u, payload = 0u;
             if (!bio_read_u32(&r, &type_index) || !bio_read_u32(&r, &payload)) {
@@ -973,41 +1395,109 @@ bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_s
         }
     }
 
-    *scene_environment(scene) = env; // 一次读完整块再覆盖：中途失败不会留下半个场景
+    if (!is_prefab) {
+        *scene_environment(scene) = env; // 一次读完整块再覆盖：中途失败不会留下半个场景
+    }
     stats.entities_loaded = ent_count;
+
+    // 根实体：预制体实例化后要拿它去挂到目标场景的节点上。
+    // 走到这里 dense_map 已经填好，root_dense 也在校验时确认过在范围内。
+    if (out_root != NULL) {
+        *out_root = is_prefab ? dense_map[root_dense] : ENTITY_NONE;
+    }
     if (out_stats != NULL) {
         *out_stats = stats;
     }
     return true;
 }
 
+// 读档的两个公开入口负责 scratch arena 的 mark/rewind。
+//
+// 为什么在**读**这边做而不在写那边：写出的字节要交回给调用方（测试会拿它做
+// 逐字节比对），所以那块缓冲区归调用方给的 arena；读档的三张临时表
+// （dense 映射、父 dense、组件计数）纯属实现细节，用完就该整体丢掉。
+// 少了这一步，"实例化 100 次预制体"就是 100 × 实体容量 × 4 字节的净增长 ——
+// 前 99 次都不会失败，所以它只能靠"根本不留"来防。
+bool scene_read_binary_root(scene_t *scene, const void *bytes, usize size,
+                            scene_io_stats_t *out_stats, entity_t *out_root)
+{
+    arena_t *scratch = scene_scratch_arena(scene);
+    if (scratch == NULL) {
+        LOG_ERROR("场景缺少 scratch arena，无法读档");
+        return false;
+    }
+    const arena_mark_t mark = arena_mark(scratch);
+    const bool ok = read_archive(scene, bytes, size, out_stats, out_root);
+    arena_rewind(scratch, mark);
+    return ok;
+}
+
+bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_stats_t *out_stats)
+{
+    return scene_read_binary_root(scene, bytes, size, out_stats, NULL);
+}
+
 // ============================================================ 文件读写
 
-bool scene_save_binary(scene_t *scene, const char *path, scene_io_stats_t *out_stats)
+// 把一份已经生成好的存档落盘。单独一个函数是因为存场景和存预制体
+// 除了"字节从哪来"以外完全一样，而错误处理（短写、fclose 失败）抄两遍
+// 迟早会有一遍是错的。
+static bool scene_write_file(const void *bytes, usize size, const char *path, const char *what)
 {
-    if (path == NULL) {
-        return false;
-    }
     FILE *file = fopen(path, "wb");
     if (file == NULL) {
-        LOG_ERROR("无法写入场景存档: %s", path);
-        return false;
-    }
-
-    void *bytes = NULL;
-    usize size = 0u;
-    if (!scene_write_binary(scene, scene_scratch_arena(scene), &bytes, &size, out_stats)) {
-        fclose(file);
+        LOG_ERROR("无法写入%s存档: %s", what, path);
         return false;
     }
     const bool wrote = (fwrite(bytes, 1u, size, file) == size);
     const bool closed = (fclose(file) == 0);
     if (!wrote || !closed) {
-        LOG_ERROR("写入场景存档失败: %s", path);
+        LOG_ERROR("写入%s存档失败: %s（%s）", what, path, wrote ? "关闭失败" : "写入不完整");
         return false;
     }
-    LOG_INFO("场景已存盘: %s（%llu 字节）", path, (unsigned long long)size);
+    LOG_INFO("%s已存盘: %s（%llu 字节）", what, path, (unsigned long long)size);
     return true;
+}
+
+// 存盘的两个入口负责 scratch arena 的 mark/rewind：那块缓冲区只活着到 fwrite 结束。
+// 不丢掉的话，编辑器里每按一次 Ctrl+S 就净增长一份场景大小 ——
+// 第一次不会失败，所以这种泄漏只能靠纪律而不是靠运气。
+bool scene_save_binary(scene_t *scene, const char *path, scene_io_stats_t *out_stats)
+{
+    if (path == NULL) {
+        return false;
+    }
+    arena_t *scratch = scene_scratch_arena(scene);
+    if (scratch == NULL) {
+        LOG_ERROR("场景缺少 scratch arena，无法存盘");
+        return false;
+    }
+    const arena_mark_t mark = arena_mark(scratch);
+    void *bytes = NULL;
+    usize size = 0u;
+    const bool ok = scene_write_binary(scene, scratch, &bytes, &size, out_stats) &&
+                    scene_write_file(bytes, size, path, "场景");
+    arena_rewind(scratch, mark);
+    return ok;
+}
+
+bool scene_save_prefab(scene_t *scene, entity_t root, const char *path, scene_io_stats_t *out_stats)
+{
+    if (path == NULL) {
+        return false;
+    }
+    arena_t *scratch = scene_scratch_arena(scene);
+    if (scratch == NULL) {
+        LOG_ERROR("场景缺少 scratch arena，无法导出预制体");
+        return false;
+    }
+    const arena_mark_t mark = arena_mark(scratch);
+    void *bytes = NULL;
+    usize size = 0u;
+    const bool ok = scene_write_prefab(scene, root, scratch, &bytes, &size, out_stats) &&
+                    scene_write_file(bytes, size, path, "预制体");
+    arena_rewind(scratch, mark);
+    return ok;
 }
 
 bool scene_load_binary(scene_t *scene, const char *path, scene_io_stats_t *out_stats)
@@ -1034,6 +1524,14 @@ bool scene_load_binary(scene_t *scene, const char *path, scene_io_stats_t *out_s
     rewind(file);
 
     arena_t *arena = scene_scratch_arena(scene);
+    if (arena == NULL) {
+        LOG_ERROR("场景缺少 scratch arena，无法读档");
+        fclose(file);
+        return false;
+    }
+    // 临时文件缓冲走 scratch，且由 scene_read_binary_root 自己的 mark 管不到它 ——
+    // 所以这里也要 mark/rewind，否则"加载 100 个预制体文件"就是 100 份文件大小。
+    const arena_mark_t mark = arena_mark(arena);
     void *buffer = arena_alloc(arena, (usize)length);
     if (buffer == NULL) {
         LOG_ERROR("场景存档超出 scratch arena 容量: %s（%ld 字节）", path, length);
@@ -1043,9 +1541,12 @@ bool scene_load_binary(scene_t *scene, const char *path, scene_io_stats_t *out_s
     if (fread(buffer, 1u, (usize)length, file) != (usize)length) {
         LOG_ERROR("场景存档读取不完整: %s", path);
         fclose(file);
+        arena_rewind(arena, mark);
         return false;
     }
     fclose(file);
 
-    return scene_read_binary(scene, buffer, (usize)length, out_stats);
+    const bool ok = scene_read_binary_root(scene, buffer, (usize)length, out_stats, NULL);
+    arena_rewind(arena, mark);
+    return ok;
 }

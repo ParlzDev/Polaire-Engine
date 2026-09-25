@@ -28,6 +28,7 @@ add_executable(engine_tests
     test_json.c
     test_ecs.c
     test_scene_io.c
+    test_prefab.c
 )
 
 target_include_directories(engine_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

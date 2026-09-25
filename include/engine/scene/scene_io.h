@@ -20,7 +20,7 @@
 //
 //  ---- 文件布局 ----
 //
-//      [0,64)     头部（魔数、版本、注册表哈希、各段计数）
+//      [0,64)     头部（魔数、版本、注册表哈希、各段计数、存档种类、根 dense）
 //      环境块 → 类型表 → meshes → atlases → materials
 //      实体索引段 → 实体数据段
 //
@@ -56,6 +56,13 @@
 //  它同时验了写出顺序稳定（按 dense id、按类型 id）、浮点可往返、
 //  dense id 重映射没接错、资源名字翻译没偏移。见 tests/test_scene_io.c。
 //
+//  一个必须说清的限定：**加载会把 dense 空间压实**。实体销毁后 id 不回收，
+//  所以编辑器里存出的第一份存档 dense 列是带洞的（0,1,2,4,6），
+//  读进来再存就变成 0,1,2,3,4 —— 这两次字节可以不同（内容相同）。
+//  从第二次起进入规范形，往后再怎么往返都逐字节相同。
+//  所以判据准确地说是"任意场景读一遍之后，往返逐字节一致"，
+//  而 tests 里那条 dense_holes 就是钉这个的。
+//
 //  JSON 形式挪到 M11（编辑器/工具链）：那时它有明确的使用者，
 //  而且只需给这套遍历再加一个 sink，不必在 M5 同时验证两条输出路径。
 // =============================================================================
@@ -69,6 +76,23 @@
 #define SCENE_FILE_MAGIC 0x4E454353u // 按字节写出去是 'S','C','E','N'
 #define SCENE_FILE_VERSION 1u
 #define SCENE_FILE_HEADER_SIZE 64u
+
+// 存档种类写在头部第 9 个 u32 上。为什么不用"root_dense != NONE"推断：
+// 那种隐含的判别法在两年后回头看会变成"某个字段有双重含义"，
+// 而双重含义的字段是格式演进时最先腐烂的地方。
+typedef enum scene_archive_kind_t {
+    SCENE_ARCHIVE_SCENE = 0u,  // 整场景：环境块是数据
+    SCENE_ARCHIVE_PREFAB = 1u, // 子树：环境块按默认值写、读侧不应用
+    SCENE_ARCHIVE_KIND_COUNT
+} scene_archive_kind_t;
+
+// 头部布局（每个字段一个 u32，小端；下标是"第几个 u32"，字节偏移 = 下标 × 4）：
+//   [0] 魔数  [1] 版本  [2] 注册表哈希  [3] 实体数  [4] 网格数  [5] 图集数
+//   [6] 材质数  [7] 类型数  [8] 存档种类  [9] 根实体的 dense id  [10,16) 保留
+#define SCENE_FILE_OFF_ENT 12u
+#define SCENE_FILE_OFF_MESH 16u
+#define SCENE_FILE_OFF_KIND 32u
+#define SCENE_FILE_OFF_ROOT 36u
 
 typedef struct scene_io_stats_t {
     u32 entities_written;
@@ -103,6 +127,33 @@ bool scene_write_binary(scene_t *scene, arena_t *arena, void **out_bytes, usize 
                         scene_io_stats_t *out_stats);
 bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_stats_t *out_stats);
 
+// 带"根实体"输出的读档，预制体实例化走这条。
+// 整场景存档没有根（头部那个字段是 NONE），此时 *out_root = ENTITY_NONE。
+bool scene_read_binary_root(scene_t *scene, const void *bytes, usize size,
+                            scene_io_stats_t *out_stats, entity_t *out_root);
+
+// ---------------------------------------------------------------- 预制体形式
+//
+// 预制体就是"一份带根的场景存档"，所以它和场景共用同一套编解码 ——
+// 不是图省事：两份实现会在同一天以两种不同的方式烂掉，而这份格式的
+// 每一次改动都必须同时体现在存和读两侧。
+//
+// 和整场景存档的三点差别：
+//   1. 只写 root 及其后代，dense id 在子树内重新从 0 编号；
+//      引用子树外的实体一律变 NONE（预制体不许偷偷依赖外面的东西）；
+//   2. 只写**被引用到**的资源，不是源场景的整张资源表。
+//      否则"实例化一个炮塔"会把 200 个网格名一并灌进目标场景，
+//      资源表上限 128 —— 第三次实例化就直接失败了；
+//   3. 环境块按默认值写出、读侧不应用：预制体没有"环境"这个概念，
+//      但段还在，这样格式只有一种、偏移只有一套。
+bool scene_write_prefab(scene_t *scene, entity_t root, arena_t *arena, void **out_bytes,
+                        usize *out_size, scene_io_stats_t *out_stats);
+bool scene_save_prefab(scene_t *scene, entity_t root, const char *path,
+                       scene_io_stats_t *out_stats);
+
+// 子树大小（含 root 自己）。0 = root 无效。06_scene 与测试用它核对实例数。
+u32 scene_subtree_size(scene_t *scene, entity_t root);
+
 // ---------------------------------------------------------------- 文件形式
 //
 // 加载**不清空世界**，只追加。不给 auto_clear 开关：
@@ -114,5 +165,10 @@ bool scene_load_binary(scene_t *scene, const char *path, scene_io_stats_t *out_s
 // 整张注册表的合并 schema 哈希，写进文件头。
 // 一次比较就回答"这份存档是不是这个版本的引擎能读的"。
 u32 scene_registry_hash(scene_t *scene);
+
+// 只 peek 头部的两个计数，**不做任何校验**（校验在 scene_read_binary* 里，只有一处）。
+// 之所以放在这里而不是让 prefab.c 自己去按偏移取字节：头部的布局只有这一个文件
+// 应该知道 —— 把偏移抄进第二个 TU，就是给格式埋第二处会漂的地方。
+bool scene_archive_peek(const void *bytes, usize size, u32 *out_entities, u32 *out_kind);
 
 #endif // ENGINE_SCENE_SCENE_IO_H

@@ -132,6 +132,9 @@ bool scene_add_material(scene_t *scene, const char *name, const char *pipeline_n
                         const material_t *material, u32 *out_id);
 // 给材质挂一张已登记的图集（按槽位）。
 bool scene_material_set_atlas(scene_t *scene, u32 material_id, u32 slot, u32 atlas_id);
+// 这个槽位挂的是资源表里的哪个图集；没挂返回 SCENE_RESOURCE_NONE。
+// 存档要的是这个而不是 material_t.textures[] —— 那份是 GPU 句柄，跨运行无意义。
+u32 scene_material_atlas(const scene_t *scene, u32 material_id, u32 slot);
 
 u32  scene_find_mesh(const scene_t *scene, const char *name);
 u32  scene_find_atlas(const scene_t *scene, const char *name);

@@ -44,5 +44,6 @@ void test_json_register(void);
 // M5：ECS + 场景
 void test_ecs_register(void);
 void test_scene_io_register(void);
+void test_prefab_register(void);
 
 #endif // MYENGINE_TEST_SUITES_H
