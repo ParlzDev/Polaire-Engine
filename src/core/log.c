@@ -282,6 +282,10 @@ bool log_init(const char *file_path, log_level_t min_level)
         }
     }
 
+    // 顺序要紧：先换代码页，再决定要不要输出颜色码。
+    // 引擎所有文本都是 UTF-8，而中文 Windows 的控制台默认按 936/GBK 解释字节 ——
+    // 不换的话第一条日志就已经是乱码，报错恰好就在那些行里。
+    (void)console_set_utf8();
     g_log.ansi_enabled = console_enable_ansi();
 
     log_unlock();

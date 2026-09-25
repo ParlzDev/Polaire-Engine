@@ -43,16 +43,67 @@
 #include "engine/engine.h"
 
 // ecs/ 与 scene/ 刻意不在 engine.h 里（理由见那份注释），示例自己按需包含。
+#include <errno.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "engine/engine.h"
+
+// ecs/ 与 scene/ 刻意不在 engine.h 里（理由见那份注释），示例自己按需包含。
 #include "engine/ecs/ecs.h"
 #include "engine/scene/ecs_submit.h"
 #include "engine/scene/prefab.h"
 #include "engine/scene/scene.h"
 #include "engine/scene/scene_io.h"
 
+#ifdef _WIN32
+#include <direct.h>
+// MSVC 的 CRT 给 POSIX 名字加了警告（"用 ISO 名字"），所以 Windows 上走 _mkdir/_chdir。
+#define EXAMPLE_MKDIR(path) _mkdir(path)
+#define EXAMPLE_CHDIR(path) _chdir(path)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define EXAMPLE_MKDIR(path) mkdir((path), 0777)
+#define EXAMPLE_CHDIR(path) chdir(path)
+#endif
+
 #define DEMO_MAX_BENCH_ENTS 200000u
 #define DEMO_BENCH_FRAMES 30u
 #define DEMO_PILLAR_LIMIT 64u
 #define DEMO_MESH_PATH "assets/models/cube.mesh"
+
+// ---------------------------------------------------------------- 工作目录
+
+// 从当前目录往上找资源根（有 assets/ 的那一层），找到就把工作目录切过去。
+//
+// 为什么切目录而不是把每条路径各自拼成绝对路径：示例与**存档文件里记的都是相对路径**
+// （"assets/models/cube.mesh"），存档里的路径必须跟着资产走，绝对路径反而没法搬。
+// 切一次 cwd 之后读、写、以及存档内部记录的路径全都一致。
+// 从 build/... 里直接双击 exe 是这个项目最常见的"资产读不到 + 存盘失败"来源，
+// 而症状看起来像引擎坏了。
+//
+// 判据用"能不能建 assets/scenes"而不是 fopen 某个文件：一次解决两件事 ——
+// 认出资源根（父目录不存在时 mkdir 会失败），并且备好示例要写 .scene 的那个目录
+// （目录不存在时 fopen("wb") 直接失败，报错却只说"无法写入"）。
+static bool settle_assets_root(u32 *out_levels_up)
+{
+    for (u32 up = 0u; up <= 6u; ++up) {
+        if (EXAMPLE_MKDIR("assets/scenes") == 0 || errno == EEXIST) {
+            *out_levels_up = up;
+            return true;
+        }
+        if (up == 6u) {
+            break;
+        }
+        if (EXAMPLE_CHDIR("..") != 0) {
+            return false; // 到顶了
+        }
+    }
+    return false;
+}
 
 // =============================================================================
 //  项目级组件：Spin
@@ -383,17 +434,19 @@ static void add_orbit_camera(demo_t *demo)
 static bool author_demo_scene(demo_t *demo, assets_t *assets, entity_t *out_prefab_root)
 {
     scene_t     *scene = demo->scene;
-    renderer_t  *renderer = scene_renderer(scene);
     ecs_world_t *world = scene_world(scene);
 
+    // 网格从哪儿来由 main 一次决定（assets_create 之后那次 file_exists 检查）。
+    // 这里以前自己也去读一次文件，于是同一个缺失资产会报两遍错 ——
+    // 两个地方各自判断"能不能读到"，就必然出现"一处以为能读到、另一处读到失败"。
     u32 cube = SCENE_RESOURCE_NONE;
-    if (!scene_add_mesh_from_file(scene, "cube", DEMO_MESH_PATH, &cube)) {
-        LOG_WARN("%s 加载失败，改用程序化立方体", DEMO_MESH_PATH);
-        assets->cube = mesh_create_cube(renderer, 1.0f);
-        assets->cube_procedural = mesh_is_valid(renderer, assets->cube);
-        if (!assets->cube_procedural || !scene_add_mesh_handle(scene, "cube", assets->cube, &cube)) {
+    if (assets->cube_procedural) {
+        if (!scene_add_mesh_handle(scene, "cube", assets->cube, &cube)) {
             return false;
         }
+    } else if (!scene_add_mesh_from_file(scene, "cube", DEMO_MESH_PATH, &cube)) {
+        LOG_ERROR("%s 存在但读不出来（文件坏了？）", DEMO_MESH_PATH);
+        return false;
     }
 
     u32 checker = SCENE_RESOURCE_NONE, white = SCENE_RESOURCE_NONE;
@@ -898,10 +951,22 @@ int main(int argc, char **argv)
     allocator_tracking_t tracker;
     allocator_tracking_init(&tracker, allocator_heap());
 
+    // 工作目录要先定下来：日志文件、资产路径、存档里记的路径全都按它解释。
+    u32        levels_up = 0u;
+    const bool rooted = settle_assets_root(&levels_up);
+
     if (!log_init("06_scene.log", LOG_LEVEL_INFO)) {
         fprintf(stderr, "无法打开日志文件，继续使用控制台输出\n");
     }
     LOG_INFO("MyEngine %s —— M5 场景层", MYENGINE_VERSION_STRING);
+
+    if (!rooted) {
+        // 报一次就说清楚：后面的"资产读不到"全是这个原因，不是资产坏了。
+        LOG_WARN("当前目录往上 6 层内没找到 assets/，路径将按当前目录解释："
+                 "几何会回落成程序化立方体，而存盘可能失败");
+    } else if (levels_up > 0u) {
+        LOG_INFO("资源根不在当前目录：工作目录已向上切换 %u 级", (unsigned)levels_up);
+    }
 
     if (!platform_time_init(true)) {
         LOG_ERROR("计时系统初始化失败");
