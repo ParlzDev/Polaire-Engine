@@ -156,6 +156,9 @@ add_library(engine STATIC
     src/ecs/ecs_query.c
     src/ecs/ecs_system.c
     src/ecs/ecs_transform.c
+    # 场景层（M5）：唯一同时看得见 ecs 与 render 的一层
+    src/scene/scene.c
+    src/scene/ecs_submit.c
     # 2D 管线（M3）
     src/render/sprite.c
     src/render/sprite_batch.c
