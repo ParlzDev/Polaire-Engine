@@ -1,0 +1,567 @@
+{
+  "format": "MyEngine-Scene",
+  "version": 1,
+  "kind": "scene",
+  "registry_hash": 902159987,
+  "root": null,
+  "environment": {
+    "clear_color": [0.035, 0.045, 0.075, 1],
+    "clear_color_enabled": true,
+    "clear_depth_enabled": true,
+    "ambient_color": [0.52, 0.58, 0.72],
+    "ambient_intensity": 0.24,
+    "fog_enabled": true,
+    "fog_color": [0.3, 0.36, 0.48],
+    "fog_start": 16,
+    "fog_end": 78,
+    "fog_density": 1,
+    "skybox_enabled": true,
+    "sky_horizon": [0.66, 0.75, 0.88],
+    "sky_zenith": [0.18, 0.34, 0.66],
+    "sky_ground": [0.13, 0.12, 0.11],
+    "tonemap_mode": 1,
+    "exposure": 1.05,
+    "msaa_samples": 4,
+    "shadows_enabled": true,
+    "shadow_strength": 0.82,
+    "shadow_map_size": 2048,
+    "culling_enabled": true,
+    "use_scene_target": true
+  },
+  "meshes": [
+    {
+      "name": "cube",
+      "path": "assets/models/cube.mesh"
+    }
+  ],
+  "atlases": [
+    {
+      "name": "checker",
+      "path": ""
+    },
+    {
+      "name": "white",
+      "path": ""
+    }
+  ],
+  "materials": [
+    {
+      "name": "metal",
+      "pipeline": "pbr",
+      "atlases": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "tint": [0.72, 0.75, 0.8, 1],
+      "pbr": [0.85, 0.28, 0.6, 1],
+      "emissive": [0, 0, 0, 0]
+    },
+    {
+      "name": "stone",
+      "pipeline": "pbr_two_sided",
+      "atlases": [
+        "checker",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "tint": [0.85, 0.82, 0.78, 1],
+      "pbr": [0, 0.78, 0.3, 1],
+      "emissive": [0, 0, 0, 0]
+    },
+    {
+      "name": "glow",
+      "pipeline": "pbr",
+      "atlases": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "tint": [1, 1, 1, 1],
+      "pbr": [0.1, 0.4, 0.4, 1],
+      "emissive": [1, 0.7, 0.35, 0]
+    }
+  ],
+  "entities": [
+    {
+      "dense": 0,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, -0.3, 0],
+            "rotation": [0, 0, 0, 1],
+            "scale": [26, 0.3, 26]
+          }
+        },
+        {
+          "type": "MeshRenderer",
+          "fields": {
+            "mesh": "cube",
+            "material": "stone",
+            "layer": 1,
+            "cast_shadow": false
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "ground"
+          }
+        }
+      ]
+    },
+    {
+      "dense": 1,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [-4.5, 1.6, -1.5],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1, 4, 1]
+          }
+        },
+        {
+          "type": "MeshRenderer",
+          "fields": {
+            "mesh": "cube",
+            "material": "stone",
+            "layer": 1,
+            "cast_shadow": true
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "pillar_a"
+          }
+        }
+      ]
+    },
+    {
+      "dense": 2,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [4.5, 1.6, -1.5],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1, 4, 1]
+          }
+        },
+        {
+          "type": "MeshRenderer",
+          "fields": {
+            "mesh": "cube",
+            "material": "stone",
+            "layer": 1,
+            "cast_shadow": true
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "pillar_b"
+          }
+        }
+      ]
+    },
+    {
+      "dense": 3,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, 2.4, 0],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1.6, 1.6, 1.6]
+          }
+        },
+        {
+          "type": "MeshRenderer",
+          "fields": {
+            "mesh": "cube",
+            "material": "metal",
+            "layer": 1,
+            "cast_shadow": true
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "cube_spinning"
+          }
+        },
+        {
+          "type": "Spin",
+          "fields": {
+            "degrees_per_second": 42,
+            "axis": 1
+          }
+        }
+      ]
+    },
+    {
+      "dense": 4,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [2.2, 0.9, 3.2],
+            "rotation": [0, 0, 0, 1],
+            "scale": [0.9, 0.9, 0.9]
+          }
+        },
+        {
+          "type": "MeshRenderer",
+          "fields": {
+            "mesh": "cube",
+            "material": "glow",
+            "layer": 1,
+            "cast_shadow": true
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "cube_slow"
+          }
+        },
+        {
+          "type": "Spin",
+          "fields": {
+            "degrees_per_second": -14,
+            "axis": 1
+          }
+        }
+      ]
+    },
+    {
+      "dense": 5,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, 0, 0],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1, 1, 1]
+          }
+        },
+        {
+          "type": "MeshRenderer",
+          "fields": {
+            "mesh": "cube",
+            "material": "glow",
+            "layer": 1,
+            "cast_shadow": false
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "lamp_rig"
+          }
+        },
+        {
+          "type": "Spin",
+          "fields": {
+            "degrees_per_second": 28,
+            "axis": 1
+          }
+        }
+      ]
+    },
+    {
+      "dense": 6,
+      "parent": 5,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, 3.2, 0],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1, 1, 1]
+          }
+        },
+        {
+          "type": "Parent",
+          "fields": {
+            "parent": 5
+          }
+        },
+        {
+          "type": "MeshRenderer",
+          "fields": {
+            "mesh": "cube",
+            "material": "glow",
+            "layer": 1,
+            "cast_shadow": false
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "lamp_arm"
+          }
+        }
+      ]
+    },
+    {
+      "dense": 7,
+      "parent": 6,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, 1.1, 1.6],
+            "rotation": [0, 0, 0, 1],
+            "scale": [0.55, 0.55, 0.55]
+          }
+        },
+        {
+          "type": "Parent",
+          "fields": {
+            "parent": 6
+          }
+        },
+        {
+          "type": "MeshRenderer",
+          "fields": {
+            "mesh": "cube",
+            "material": "glow",
+            "layer": 1,
+            "cast_shadow": true
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "lamp_head"
+          }
+        }
+      ]
+    },
+    {
+      "dense": 8,
+      "parent": 7,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, 0.45, 0],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1, 1, 1]
+          }
+        },
+        {
+          "type": "Parent",
+          "fields": {
+            "parent": 7
+          }
+        },
+        {
+          "type": "Light",
+          "fields": {
+            "type": 1,
+            "color": [1, 0.62, 0.32],
+            "intensity": 6.5,
+            "direction": [0, -1, 0],
+            "range": 14,
+            "inner_angle_degrees": 0,
+            "outer_angle_degrees": 0,
+            "cast_shadow": false
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "lamp_light"
+          }
+        }
+      ]
+    },
+    {
+      "dense": 9,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, 0, 0],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1, 1, 1]
+          }
+        },
+        {
+          "type": "Light",
+          "fields": {
+            "type": 0,
+            "color": [1, 0.96, 0.9],
+            "intensity": 3.1,
+            "direction": [-0.45, -0.75, 0.35],
+            "range": 0,
+            "inner_angle_degrees": 24,
+            "outer_angle_degrees": 38,
+            "cast_shadow": true
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "sun"
+          }
+        }
+      ]
+    },
+    {
+      "dense": 10,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, 0, 0],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1, 1, 1]
+          }
+        },
+        {
+          "type": "Light",
+          "fields": {
+            "type": 0,
+            "color": [0.42, 0.55, 0.75],
+            "intensity": 0.7,
+            "direction": [0.6, -0.35, -0.6],
+            "range": 0,
+            "inner_angle_degrees": 24,
+            "outer_angle_degrees": 38,
+            "cast_shadow": false
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "fill"
+          }
+        }
+      ]
+    },
+    {
+      "dense": 11,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, 0, 0],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1, 1, 1]
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "camera_rig"
+          }
+        },
+        {
+          "type": "Spin",
+          "fields": {
+            "degrees_per_second": 9,
+            "axis": 1
+          }
+        }
+      ]
+    },
+    {
+      "dense": 12,
+      "parent": 11,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [0, 4.5, -13],
+            "rotation": [0, 1, 0, -4.371139e-08],
+            "scale": [1, 1, 1]
+          }
+        },
+        {
+          "type": "Parent",
+          "fields": {
+            "parent": 11
+          }
+        },
+        {
+          "type": "Camera",
+          "fields": {
+            "projection": 0,
+            "fov_y_degrees": 55,
+            "ortho_height": 0,
+            "znear": 0.1,
+            "zfar": 2e+02,
+            "active": true
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "main_camera"
+          }
+        }
+      ]
+    },
+    {
+      "dense": 13,
+      "parent": null,
+      "components": [
+        {
+          "type": "Transform",
+          "fields": {
+            "position": [-6, 3, 0],
+            "rotation": [0, 0, 0, 1],
+            "scale": [1, 1, 1]
+          }
+        },
+        {
+          "type": "SpriteRenderer",
+          "fields": {
+            "color": [0.95, 0.85, 0.35, 1],
+            "size": [2.6, 1.8],
+            "uv_min": [0, 0],
+            "uv_max": [1, 1],
+            "atlas": "white",
+            "layer": 3
+          }
+        },
+        {
+          "type": "Name",
+          "fields": {
+            "text": "hud_sprite"
+          }
+        }
+      ]
+    }
+  ]
+}

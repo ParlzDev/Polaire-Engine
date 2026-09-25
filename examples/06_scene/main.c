@@ -8,30 +8,38 @@
 //      3. 每帧跑一次世界 + 提交；
 //      4. 打印统计。
 //
-//  author_demo_scene() 只在"存档不存在"或 --save 时跑，它存在的唯一理由是把那份
-//  .scene 造出来（格式是二进制的，手写字节流不现实）。M11 的编辑器会取代它。
+//  author_demo_scene() 只在"存档不存在"或 --save 时跑，它存在的唯一理由是把那两份
+//  存档造出来（m5_demo.scene 与 m5_demo.scene.json —— 同一次导出，两种编码）。
+//  之后 .scene.json 就是可以手改的那一份：字段名与组件名都是明文，
+//  没写的字段取默认值。M11 的编辑器会取代 author_demo_scene()。
 //
 //  验证 M5 的哪几条：
 //    * 实体 + 组件：网格/精灵/相机/灯/名字 + 一个项目级组件 Spin
 //    * 固定阶段调度：Spin 在 LOGIC 阶段，世界矩阵在 TRANSFORM 阶段，同一帧内成立
-//    * 父子层级：轨道相机只是"会转的节点的子节点"，没有一行特例代码
-//    * 场景可存读：.scene；往返逐字节一致由 tests/test_scene_io.c 钉住
+//    * 父子层级：3 层链（地面→柱身→柱顶灯臂），动父节点子节点跟着走
+//    * 场景可存读：.scene 与 .scene.json **两种编码描述同一份数据**，
+//      每次启动都当场自检（二进制 ↔ JSON 转码逐字节相同，失败就退出码非 0）；
+//      更细的判据由 tests/test_scene_io.c 钉住
 //    * 预制体：.prefab 可反复实例化，资源依赖跟着走
+//    * 2D 与 3D 同帧共存：靠 render layer 区分，不靠两套架构
 //    * ECS→渲染桥接：画面里的一切都经 scene_submit_frame
 //    * 1k/10k/100k 实体的帧时间与内存：--bench N
 //
 //  操作：
 //      ESC   退出
 //      N     加一根柱子（实例化一次预制体）
-//      P     把当前场景存回 .scene（关掉程序再开就能看到数据驱动的效果）
-//      R     清空世界，重新从 .scene 加载
+//      P     把当前场景存回 .scene 与 .scene.json
+//      R     清空世界，重新从存档加载
+//      1/2   在二进制与 JSON 两份存档之间切换重载（证明两者渲染结果一致）
 //
 //  命令行：
-//      --scene PATH      场景存档路径（默认 assets/scenes/m5_demo.scene）
+//      --scene PATH      场景存档路径（默认 assets/scenes/m5_demo.scene；
+//                        给 .json 后缀就读 JSON 那份，实际按内容判定）
 //      --prefab PATH     预制体路径（默认 assets/scenes/m5_pillar.prefab）
-//      --save            重新生成两份资产后退出
+//      --save            重新生成存档（两种编码）与预制体后退出
+//      --check-pixel     读回若干像素验证 2D/3D 同帧与色彩管线，失败则退出码非 0
 //      --frames N        跑 N 帧后退出（CI 用）
-//      --bench N         建 N 个实体，测 world_update / 提交的 CPU 耗时后退出
+//      --bench N         建 N 个实体，测 world_update / 提交 / 整帧的 CPU 耗时后退出
 //      --instances N     启动后立刻实例化 N 份预制体并计时
 //      --hidden / --no-vsync / --width / --height
 // =============================================================================
@@ -369,6 +377,25 @@ static entity_t add_box(demo_t *demo, const char *name, vec3_t position, vec3_t 
     return e;
 }
 
+// 挂在某个父节点下面的盒子。和 add_box 分开写，是因为父子链上每一层要的组件不同：
+// 根那一层带 Spin（会自己转），中间层只是挂点，叶子带灯。
+// 硬塞成一个函数加一堆可选参数，读的人反而看不出哪层挂了些什么。
+static entity_t add_child_box(demo_t *demo, const char *name, entity_t parent, vec3_t position,
+                              vec3_t scale, u32 mesh, u32 material, bool cast_shadow)
+{
+    ecs_world_t *world = scene_world(demo->scene);
+    const entity_t e = add_box(demo, name, position, scale, mesh, material, cast_shadow, 0.0f);
+    if (!entity_is_valid(e)) {
+        return ENTITY_NONE;
+    }
+    if (!entity_is_valid(parent) || !ecs_set_parent(world, e, parent)) {
+        // 挂不上就是 D4 的两道防线之一在起作用（环或超深当场拒绝）
+        LOG_ERROR("%s 挂不到父节点上（父子环？超深？）", name);
+        return ENTITY_NONE;
+    }
+    return e;
+}
+
 static void add_light(demo_t *demo, const char *name, u32 type, vec3_t position, vec3_t direction,
                       vec3_t color, f32 intensity, f32 range, bool cast_shadow)
 {
@@ -498,17 +525,35 @@ static bool author_demo_scene(demo_t *demo, assets_t *assets, entity_t *out_pref
     (void)add_box(demo, "cube_slow", vec3_make(2.2f, 0.9f, 3.2f), vec3_splat(0.9f), cube, mat_glow,
                   true, -14.0f);
 
-    // 提着灯走：灯挂在一个会转的父节点下面，于是它绕着场景移动。
-    // 组件里**没有**第二份坐标（存两份迟早不一致）。
-    const entity_t arm =
-        add_box(demo, "lamp_arm", vec3_zero(), vec3_one(), cube, mat_glow, false, 28.0f);
-    if (entity_is_valid(arm)) {
-        const entity_t lamp = ecs_create_entity(world);
-        (void)ecs_transform_set_local(world, lamp, vec3_make(0.0f, 4.5f, 5.0f), quat_identity(),
-                                      vec3_one());
-        (void)ecs_set_parent(world, lamp, arm);
-        add_light(demo, "lamp", 1u, vec3_make(0.0f, 4.5f, 5.0f), vec3_make(0.0f, -1.0f, 0.0f),
-                  vec3_make(1.0f, 0.62f, 0.32f), 6.5f, 14.0f, false);
+    // 提着灯走：灯挂在一条**四层**链的最深处（rig → arm → head → light）。
+    // 组件里没有第二份坐标（存两份迟早不一致），而链长是 D4 那条
+    // "拍平拓扑序"的判据本身 —— 两层链在一帧内看不出求值顺序错没错。
+    const entity_t rig = add_box(demo, "lamp_rig", vec3_zero(), vec3_one(), cube, mat_glow, false,
+                                 28.0f);
+    entity_t chain_leaf = ENTITY_NONE;
+    if (entity_is_valid(rig)) {
+        const entity_t arm = add_child_box(demo, "lamp_arm", rig, vec3_make(0.0f, 3.2f, 0.0f),
+                                           vec3_one(), cube, mat_glow, false);
+        const entity_t head = add_child_box(demo, "lamp_head", arm, vec3_make(0.0f, 1.1f, 1.6f),
+                                            vec3_splat(0.55f), cube, mat_glow, true);
+        chain_leaf = ecs_create_entity(world);
+        (void)ecs_transform_set_local(world, chain_leaf, vec3_make(0.0f, 0.45f, 0.0f),
+                                      quat_identity(), vec3_one());
+        (void)ecs_set_parent(world, chain_leaf, head);
+        scene_name_t leaf_name;
+        memset(&leaf_name, 0, sizeof(leaf_name));
+        snprintf(leaf_name.text, sizeof(leaf_name.text), "%s", "lamp_light");
+        (void)ecs_add(world, chain_leaf, demo->ids.name, &leaf_name);
+        scene_light_t lt;
+        memset(&lt, 0, sizeof(lt));
+        lt.type = 1u; // 点光
+        lt.color = vec3_make(1.0f, 0.62f, 0.32f);
+        lt.intensity = 6.5f;
+        lt.range = 14.0f;
+        lt.direction = vec3_make(0.0f, -1.0f, 0.0f);
+        (void)ecs_add(world, chain_leaf, demo->ids.light, &lt);
+        // 链上的每一层都要有世界变换，否则"叶子跟着根走"这件事没有承载体
+        (void)ecs_transform_get_or_add(world, chain_leaf);
     }
 
     add_light(demo, "sun", 0u, vec3_zero(), vec3_make(-0.45f, -0.75f, 0.35f),
@@ -518,10 +563,12 @@ static bool author_demo_scene(demo_t *demo, assets_t *assets, entity_t *out_pref
 
     add_orbit_camera(demo);
 
-    // 一个 2D 精灵挂在 3D 场景里。M5 只要求它**能被提交**（计数会打印出来）；
-    // 2D 在屏幕上的映射规则是 M6"2.5D 混合"要定义的东西。
+    // 一个 2D 精灵和 3D 物体在同一个世界、同一个队列里。
+    // 位置用的是**世界单位**（精灵的顶点本来就是世界空间，z 被 sprite 着色器固定为 0），
+    // 所以它现在是一张贴在场景里的图；"HUD 那种屏幕像素映射"是 M6 的 2.5D 混合要定的规则。
+    // 放在这里是为了能被 --check-pixel 读回：摘掉它画面必须变，才算 2D 真的进了这一帧。
     const entity_t sprite_e = ecs_create_entity(world);
-    (void)ecs_transform_set_local(world, sprite_e, vec3_make(120.0f, 90.0f, 0.0f), quat_identity(),
+    (void)ecs_transform_set_local(world, sprite_e, vec3_make(-6.0f, 3.0f, 0.0f), quat_identity(),
                                   vec3_one());
     scene_name_t sprite_name;
     memset(&sprite_name, 0, sizeof(sprite_name));
@@ -530,7 +577,7 @@ static bool author_demo_scene(demo_t *demo, assets_t *assets, entity_t *out_pref
     scene_sprite_renderer_t sr;
     memset(&sr, 0, sizeof(sr));
     sr.color = vec4_make(0.95f, 0.85f, 0.35f, 1.0f);
-    sr.size = vec2_make(96.0f, 64.0f);
+    sr.size = vec2_make(2.6f, 1.8f); // 世界单位：这张"贴图"高 1.8 米
     sr.uv_min = vec2_make(0.0f, 0.0f);
     sr.uv_max = vec2_make(1.0f, 1.0f);
     sr.atlas = white;
@@ -595,6 +642,103 @@ static void report_load(const load_report_t *r)
            (unsigned)r->unknown_types, (unsigned)r->dangling_refs);
 }
 
+// 由一个存档路径推出**另一种编码**的路径：.scene ↔ .scene.json。
+// 为什么用"同目录同前缀 + 换后缀"而不是加个 --scene-json 参数：
+// 两种编码描述的是同一份数据，路径差一个后缀就能让人把它们当成两个资产看待,
+// 而"改了 .scene.json 但 .scene 还是旧的"这种状态是最容易让人误判的。
+static void sibling_format_path(const char *path, char *out, usize cap)
+{
+    const usize n = strlen(path);
+    if (n > 5u && strcmp(path + n - 5u, ".json") == 0) {
+        snprintf(out, cap, "%.*s", (int)(n - 5u), path); // 去掉 .json → 二进制那份
+        return;
+    }
+    snprintf(out, cap, "%s.json", path);
+}
+
+// 两种编码的等价性自检：当场做一遍，而不是只信单元测试。
+//
+//   场景 --写--> 二进制 X，--写--> JSON J，J --转码--> 二进制 X2
+//   要求 X 与 X2 逐字节相同。
+//
+// 为什么值得在示例里再做一遍：单元测试用的是离线场景（没有 renderer、没有真实
+// 资源路径），而这里这份存档是**要进仓库**的资产。两者输入不同，判据相同。
+// 失败一定要退出码非 0：自检只在"跑一遍就没人看"的情况下才有意义的话，
+// 它就成了装饰。
+static bool verify_format_equivalence(scene_t *scene)
+{
+    arena_t *scratch = scene_scratch_arena(scene);
+    const arena_mark_t mark = arena_mark(scratch);
+
+    void *binary = NULL;
+    usize binary_size = 0u;
+    void *text = NULL;
+    usize text_length = 0u;
+    bool ok = scene_write_binary(scene, scratch, &binary, &binary_size, NULL) &&
+              scene_write_json(scene, scratch, &text, &text_length, NULL);
+    usize back_size = 0u;
+    void *back = NULL;
+    if (ok) {
+        ok = scene_binary_from_json(scene, (const char *)text, text_length, scratch, &back,
+                                    &back_size);
+    }
+    if (ok && (back_size != binary_size || memcmp(binary, back, binary_size) != 0)) {
+        usize diff = 0u;
+        while (diff < binary_size && diff < back_size &&
+               ((const u8 *)binary)[diff] == ((const u8 *)back)[diff]) {
+            diff++;
+        }
+        LOG_ERROR("两种编码不等价：二进制 %llu 字节，JSON 转回 %llu 字节，首个差异在 %llu",
+                  (unsigned long long)binary_size, (unsigned long long)back_size,
+                  (unsigned long long)diff);
+        ok = false;
+    }
+    if (ok) {
+        LOG_INFO("格式自检：二进制(%llu B) ↔ JSON(%llu B) 逐字节一致",
+                 (unsigned long long)binary_size, (unsigned long long)text_length);
+    }
+    arena_rewind(scratch, mark);
+    return ok;
+}
+
+// 两种编码各存一份。第二个路径由第一个推出来。
+// stats 只从**二进制**那一次取（同一份数据写两遍，计数当然相同；
+// 取两次再判等就变成给自检加第二套逻辑了）。
+static bool save_both_formats(scene_t *scene, const char *path, scene_io_stats_t *stats)
+{
+    char sibling[512];
+    sibling_format_path(path, sibling, sizeof(sibling));
+    const bool json_first = scene_path_is_json(path);
+    return json_first ? (scene_save_json(scene, path, stats) && scene_save_binary(scene, sibling, NULL))
+                      : (scene_save_binary(scene, path, stats) && scene_save_json(scene, sibling, NULL));
+}
+
+// 清世界 → 读档 → 绑资源 → 格式自检。
+//
+// 加载**不**清空世界（隐式副作用在调用点上看不出来），所以"重新加载"
+// 就是显式的两行：先清，再读。这个函数只是把那两行连同绑资源与自检收在一起 ——
+// 示例里有两个触发点（R 原样重载、1/2 换编码），抄两遍迟早有一遍忘了绑资源。
+static bool reload_from(scene_t *scene, assets_t *assets, const char *path, f64 *out_ms,
+                        u32 *out_entities)
+{
+    const f64 t0 = now_seconds();
+    ecs_world_clear(scene_world(scene));
+    scene_io_stats_t stats;
+    if (!scene_load_auto(scene, path, &stats)) {
+        return false;
+    }
+    if (!assets_bind_to_scene(scene, assets)) {
+        LOG_ERROR("读档后绑定资源失败");
+        return false;
+    }
+    if (!verify_format_equivalence(scene)) {
+        return false;
+    }
+    *out_ms = (now_seconds() - t0) * 1000.0;
+    *out_entities = stats.entities_loaded;
+    return true;
+}
+
 // 优先读存档；读不到就现场 author 并写一份出去。
 // force_author = true 时（--save）无条件重写，方便对着代码调数据。
 static bool scene_load_or_author(demo_t *demo, assets_t *assets, const char *scene_path,
@@ -608,7 +752,7 @@ static bool scene_load_or_author(demo_t *demo, assets_t *assets, const char *sce
     if (!force_author && file_exists(scene_path)) {
         const f64 t0 = now_seconds();
         scene_io_stats_t stats;
-        if (!scene_load_binary(scene, scene_path, &stats)) {
+        if (!scene_load_auto(scene, scene_path, &stats)) {
             LOG_ERROR("场景存档加载失败: %s", scene_path);
             return false;
         }
@@ -642,7 +786,7 @@ static bool scene_load_or_author(demo_t *demo, assets_t *assets, const char *sce
         return false;
     }
     scene_io_stats_t stats;
-    if (!scene_save_binary(scene, scene_path, &stats)) {
+    if (!save_both_formats(scene, scene_path, &stats)) {
         LOG_ERROR("场景存盘失败: %s（目录不存在？用 --scene 换个路径）", scene_path);
         return false;
     }
@@ -683,7 +827,7 @@ static bool spawn_pillar(prefab_t *prefab, scene_t *scene, u32 index, f64 *out_m
 //  两个数分开打印，谁也别混进谁。
 // =============================================================================
 static void run_bench(demo_t *demo, assets_t *assets, renderer_t *renderer,
-                      const allocator_tracking_t *tracker, u32 count)
+                      const allocator_tracking_t *tracker, u32 count, bool vsync)
 {
     scene_t     *scene = demo->scene;
     ecs_world_t *world = scene_world(scene);
@@ -768,6 +912,53 @@ static void run_bench(demo_t *demo, assets_t *assets, renderer_t *renderer,
            (double)(update_total / DEMO_BENCH_FRAMES));
     fflush(stdout);
 
+    // ---- 精灵也要有：M3/M4 的"含渲染 60 FPS"判据问的是**混排**的那一帧 ----
+    //
+    // 只测方块的话，2D 的合批、贴图切换、transparent layer 全都不在这条时间里；
+    // 而"M3 的 1000 实体 60 FPS（含渲染）在 M4 末正式验证"这条判据
+    // 的原话是"同一帧里 1 万静态方块 + 1000 动图 sprites"。
+    // 数量取实体的 1/10：10k 方块正好配 1000 精灵，规模变了比例不变。
+    u32 sprites_built = 0u;
+    u32 white = SCENE_RESOURCE_NONE;
+    u32 sprite_want = count / 10u;
+    if (sprite_want > 0u) {
+        if (!scene_add_atlas_handle(scene, "bench_white", assets->white, &white)) {
+            LOG_ERROR("bench 图集登记失败，跳不过精灵那一半的压测");
+            sprite_want = 0u;
+        }
+    }
+    for (u32 i = 0u; sprite_want > 0u && i < sprite_want; ++i) {
+        const entity_t e = ecs_create_entity(world);
+        if (!entity_is_valid(e)) {
+            LOG_ERROR("第 %u 个精灵实体创建失败：世界容量不够", (unsigned)i);
+            break;
+        }
+        // 摆在相机与方块阵列之间的一条带上；每张给一个不整数化的尺寸，
+        // 免得合批后的顶点坐标因为"都落在像素网格上"而比真实情况便宜
+        const f32 x = -22.0f + (f32)(i % 50u) * 0.9f;
+        const f32 y = 1.2f + (f32)(i / 50u) * 0.9f;
+        (void)ecs_transform_set_local(world, e, vec3_make(x, y, 3.0f), quat_identity(),
+                                      vec3_one());
+        scene_sprite_renderer_t sr;
+        memset(&sr, 0, sizeof(sr));
+        sr.color = vec4_make(0.9f, 0.55f, 0.2f, 1.0f);
+        sr.size = vec2_make(0.7f + (f32)(i % 7u) * 0.05f, 0.55f + (f32)(i % 5u) * 0.04f);
+        sr.uv_min = vec2_make(0.0f, 0.0f);
+        sr.uv_max = vec2_make(1.0f, 1.0f);
+        sr.atlas = white;
+        sr.layer = (u32)RENDER_LAYER_TRANSPARENT_2D;
+        if (ecs_add(world, e, demo->ids.sprite_renderer, &sr) == NULL) {
+            break;
+        }
+        // "动图"：会转的精灵。旋转走的是同一份 Transform，所以这里复用 Spin，
+        // 而不是给精灵再造一套动画状态（两套状态迟早和拓扑序对不上）。
+        const demo_spin_t spin = { .degrees_per_second = 40.0f + (f32)(i % 9u), .axis = 2u };
+        if (ecs_add(world, e, demo->spin, &spin) == NULL) {
+            break;
+        }
+        sprites_built++;
+    }
+
     // 先取一次统计再进 [B]：[B] 的第一次重建可能很慢，
     // 把这些数字先打出来才能看出"慢在深度、还是在节点数"。
     {
@@ -811,6 +1002,54 @@ static void run_bench(demo_t *demo, assets_t *assets, renderer_t *renderer,
            (double)(submit_total / DEMO_BENCH_FRAMES));
     fflush(stdout);
 
+    // [D] **整帧**：把 end_frame（present / 交换缓冲）也算进来。
+    //
+    // 为什么 [C] 不够：[C] 是 CPU 侧录制命令的成本，而"1000 实体 60 FPS"这条
+    // 判据问的是能不能真的把画面送出去。GPU 提交与交换不在 [C] 里，
+    // 报 [C] 当帧率会把一个纯 CPU 数字当成端到端数字用。
+    //
+    // 读这一行的时候注意两件事：
+    //   1. vsync 开着时这个数字会被显示器的 16.7 ms 钳住 —— 那说明"够 60 FPS"，
+    //      但看不出还剩多少头程；要头程就用 --no-vsync 再跑一遍。
+    //   2. 它是**墙钟**时间，所以包含了驱动在命令队列满时的等待 ——
+    //      这正是"GPU 跟不上"会以什么形式出现：不是错误，是这一行变大。
+    f64 full_total = 0.0;
+    f64 full_worst = 0.0;
+    f64 full_best = 1e30;
+    for (u32 f = 0u; f < DEMO_BENCH_FRAMES; ++f) {
+        const f64 t0 = now_seconds();
+        (void)ecs_world_update(world, 1.0f / 60.0f);
+        renderer_begin_frame(renderer, &camera, &frame);
+        scene_submit_frame(&sub, renderer, 16.0f / 9.0f);
+        renderer_end_frame(renderer);
+        const f64 ms = (now_seconds() - t0) * 1000.0;
+        full_total += ms;
+        if (ms > full_worst) {
+            full_worst = ms;
+        }
+        if (ms < full_best) {
+            full_best = ms;
+        }
+    }
+    const f64 full_ms = full_total / DEMO_BENCH_FRAMES;
+    // 最快/平均/最差一起印，而不是只印平均。
+    //
+    // 理由不是排版偏好：这个数含 present，于是**驱动什么时候节流、别的进程有没有
+    // 在用 GPU**都会进来到墙钟里。同一台机器同一份二进制，实测在 1.6 与 10.4 ms
+    // 之间跳过 —— 只印一个平均数的话，下一个人抄进文档的就是一个看似精确、
+    // 实则无法复现的标量。给出区间，读者自己就能判断"够不够 60 FPS"这句话的硬度。
+    printf("  [D] 混排整帧（方块 %u + 精灵 %u，含 end_frame/present 墙钟） 平均 %8.3f ms = %.1f FPS"
+           "，最快 %.3f / 最差 %.3f ms%s\n",
+           (unsigned)built, (unsigned)sprites_built, (double)full_ms,
+           full_ms > 0.0 ? 1000.0 / (double)full_ms : 0.0, (double)full_best,
+           (double)full_worst, vsync ? "（vsync 开着，会被显示器钳住）" : "");
+    if (sprite_want > 0u && sprites_built != sprite_want) {
+        // 压测的**内容**没建起来，报出来的帧率就是在测别的东西。
+        LOG_ERROR("精灵只建出 %u/%u 个：这条 [D] 不是混排数字（容量不够？）",
+                  (unsigned)sprites_built, (unsigned)sprite_want);
+    }
+    fflush(stdout);
+
     ecs_world_stats_t wstats;
     ecs_world_get_stats(world, &wstats);
 
@@ -845,9 +1084,25 @@ typedef struct options_t {
     bool        save;
     u32         bench;
     u32         instances;
-    const char *scene_path;
-    const char *prefab_path;
+    // 路径是**可写的**：按 1/2 在两种编码之间切换时要换掉它。
+    // 为什么不用 const char*：那会让"当前用的是哪份存档"这件事存在两处
+    // （指针本身 + 一个"现在是 JSON 吗"的布尔），而两处迟早会各说一套。
+    char        scene_path[512];
+    char        prefab_path[512];
+    bool        check_pixel;
 } options_t;
+
+// 装路径。超长直接拒绝而不是截断：截断后的路径指向**另一个可能存在的文件**，
+// 那比"启动失败"难排查得多。
+static bool set_path(char *dst, usize cap, const char *src)
+{
+    if (src == NULL || strlen(src) + 1u > cap) {
+        LOG_ERROR("路径过长（上限 %u 字节）", (unsigned)cap);
+        return false;
+    }
+    snprintf(dst, cap, "%s", src);
+    return true;
+}
 
 static void print_usage(void)
 {
@@ -858,6 +1113,7 @@ static void print_usage(void)
     printf("  --frames N      跑 N 帧后退出\n");
     printf("  --bench N       建 N 个实体测帧时间后退出（1k / 10k / 100k）\n");
     printf("  --instances N   启动时实例化 N 份预制体并计时\n");
+    printf("  --check-pixel   读回画面像素，验证 2D/3D 同帧与 sRGB 管线；不符则退出码非 0\n");
     printf("  --hidden        不显示窗口\n");
     printf("  --no-vsync      关垂直同步\n");
     printf("\n运行时按键: ESC 退出 / N 加一根柱子 / P 存盘 / R 重新加载\n");
@@ -891,8 +1147,8 @@ static bool parse_options(int argc, char **argv, options_t *out)
     out->width = 1280u;
     out->height = 720u;
     out->vsync = true;
-    out->scene_path = "assets/scenes/m5_demo.scene";
-    out->prefab_path = "assets/scenes/m5_pillar.prefab";
+    snprintf(out->scene_path, sizeof(out->scene_path), "%s", "assets/scenes/m5_demo.scene");
+    snprintf(out->prefab_path, sizeof(out->prefab_path), "%s", "assets/scenes/m5_pillar.prefab");
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -920,9 +1176,15 @@ static bool parse_options(int argc, char **argv, options_t *out)
                 return false;
             }
         } else if (strcmp(arg, "--scene") == 0 && i + 1 < argc) {
-            out->scene_path = argv[++i];
+            if (!set_path(out->scene_path, sizeof(out->scene_path), argv[++i])) {
+                return false;
+            }
         } else if (strcmp(arg, "--prefab") == 0 && i + 1 < argc) {
-            out->prefab_path = argv[++i];
+            if (!set_path(out->prefab_path, sizeof(out->prefab_path), argv[++i])) {
+                return false;
+            }
+        } else if (strcmp(arg, "--check-pixel") == 0) {
+            out->check_pixel = true;
         } else if (strcmp(arg, "--hidden") == 0) {
             out->hidden = true;
         } else if (strcmp(arg, "--no-vsync") == 0) {
@@ -936,6 +1198,287 @@ static bool parse_options(int argc, char **argv, options_t *out)
         }
     }
     return true;
+}
+
+// =============================================================================
+//  一帧的渲染部分（主循环与像素验证共用）
+// =============================================================================
+//
+// 抽出来的理由不是"少写三十行"，而是**像素验证必须走真实帧那条完全相同的路**：
+// 一份复制出来的"检查用渲染函数"会先腐烂，然后验出一个已经不存在的行为。
+//
+// ---- 顺序：先跑世界，再 begin_frame，最后提交 ----
+//
+// 为什么 scene_submit_frame 不注册成 RENDER_SUBMIT 阶段的系统：
+// renderer_begin_frame 需要一个相机，而相机要从**本帧已经算完的**世界矩阵里取。
+// 提交若是系统，就必须先 begin_frame 再 update，那个相机只能是上一帧的。
+// 一帧的延迟在 60fps 下看不出来，但"剔除和阴影用的是哪一帧的相机"
+// 值得用一条注释解决，而不是留给下一个人猜。
+typedef struct frame_state_t {
+    bool shadow_fitted; // 阴影视锥要不要重新拟合（换相机/换灯之后要）
+} frame_state_t;
+
+static void render_frame(demo_t *demo, renderer_t *renderer, sprite_batch_t *batch,
+                         scene_submit_t *sub, shadow_map_t *shadow, frame_state_t *state,
+                         u32 width, u32 height, f64 delta, u64 frame_index)
+{
+    const f32 aspect = (height > 0u) ? (f32)width / (f32)height : 1.0f;
+    (void)ecs_world_update(scene_world(demo->scene), (f32)delta);
+
+    camera_t camera = camera_default();
+    const bool has_camera = scene_submit_active_camera(sub, aspect, &camera);
+    frame_desc_t frame;
+    fill_frame_desc(&frame, width, height, delta, frame_index);
+    renderer_begin_frame(renderer, &camera, &frame);
+
+    sprite_batch_begin(batch);
+    scene_submit_frame(sub, renderer, aspect);
+    sprite_batch_end(batch);
+
+    if (shadow != NULL) {
+        if (!state->shadow_fitted && has_camera) {
+            // 主光的朝向来自场景（存档里的那盏平行光）。
+            // 第一帧提交之后 renderer 里就有了它，这时候拟合一次阴影视锥。
+            const light_t *key = light_set_get(renderer_lights(renderer), 0u);
+            if (key != NULL && key->cast_shadow) {
+                shadow_map_fit_directional(shadow, key, vec3_make(0.0f, 1.5f, 0.0f), 22.0f);
+                state->shadow_fitted = true;
+            }
+        }
+        if (state->shadow_fitted) {
+            shadow_map_render(shadow, renderer);
+        }
+    }
+    renderer_end_frame(renderer);
+}
+
+// =============================================================================
+//  M5 的两条判据：动父节点叶子跟着走 / 2D 与 3D 在同一帧里都画出来了
+// =============================================================================
+
+static entity_t find_by_name(demo_t *demo, const char *name)
+{
+    ecs_world_t *world = scene_world(demo->scene);
+    entity_t list[512];
+    const u32 count = ecs_collect_entities(world, list, 512u);
+    for (u32 i = 0u; i < count; ++i) {
+        const scene_name_t *n = (const scene_name_t *)ecs_peek(world, list[i], demo->ids.name);
+        if (n != NULL && strcmp(n->text, name) == 0) {
+            return list[i];
+        }
+    }
+    return ENTITY_NONE;
+}
+
+static vec3_t world_position(ecs_world_t *world, entity_t e)
+{
+    ecs_world_transform_t wt;
+    if (!ecs_transform_get_world(world, e, &wt)) {
+        return vec3_make(0.0f / 0.0f, 0.0f, 0.0f); // NaN：调用方一看数字就知道没读到
+    }
+    return vec3_make(wt.model.col[3].x, wt.model.col[3].y, wt.model.col[3].z);
+}
+
+// 父子链：动根节点，叶子的世界位置必须在**同一帧内**移动同样的量。
+//
+// 这条为什么值得单独验一遍（而不只看测试）：D4 选的"拍平拓扑序"最大的风险就是
+// 求值顺序 —— 顺序错了的症状是"叶子慢一帧"，在 60 FPS 下肉眼看不出来，
+// 但它会让 M6 的 2.5D 挂点、M9 的动画骨骼全部错位。
+// 用 dt=0 跑这两帧：自转不推进，于是两次读数之间唯一变化的就是这一次位移。
+static bool verify_parent_chain(demo_t *demo)
+{
+    ecs_world_t *world = scene_world(demo->scene);
+    const entity_t root = find_by_name(demo, "lamp_rig");
+    const entity_t leaf = find_by_name(demo, "lamp_light");
+    if (!entity_is_valid(root) || !entity_is_valid(leaf)) {
+        LOG_ERROR("父子链验证失败：场景里找不到 lamp_rig 或 lamp_light");
+        return false;
+    }
+    // 非轴对齐的位移：只沿一个轴动的话，"深度算错但轴向碰巧对"这类 bug 能蒙过去
+    const vec3_t shift = vec3_make(3.0f, -1.5f, 2.25f);
+
+    (void)ecs_world_update(world, 0.0f);
+    const vec3_t before = world_position(world, leaf);
+    const vec3_t root_before = world_position(world, root);
+
+    ecs_transform_t *tr = (ecs_transform_t *)ecs_get(world, root, demo->ids.transform);
+    if (tr == NULL) {
+        LOG_ERROR("父子链验证失败：%s 没有本地变换", "lamp_rig");
+        return false;
+    }
+    const vec3_t original = tr->position;
+    const quat_t rotation = tr->rotation;
+    const vec3_t scale = tr->scale;
+    if (!ecs_transform_set_local(world, root, vec3_add(original, shift), rotation, scale)) {
+        LOG_ERROR("父子链验证失败：移动根节点就被拒绝");
+        return false;
+    }
+    (void)ecs_world_update(world, 0.0f);
+    const vec3_t after = world_position(world, leaf);
+    const vec3_t root_after = world_position(world, root);
+    // 再更新一次、不改动任何东西：如果叶子这一次才跟上，说明"每帧只传播一层"，
+    // 也就是拓扑序没保证父先于子 —— 那和"永远不传播"是完全不同的两个 bug。
+    (void)ecs_world_update(world, 0.0f);
+    const vec3_t one_more = world_position(world, leaf);
+
+    // 验证的副作用必须还原：这条函数跑完之后，场景要和没跑过一样
+    (void)ecs_transform_set_local(world, root, original, rotation, scale);
+    (void)ecs_world_update(world, 0.0f);
+
+    f32 err = math_abs((after.x - before.x) - shift.x);
+    err = math_max(err, math_abs((after.y - before.y) - shift.y));
+    err = math_max(err, math_abs((after.z - before.z) - shift.z));
+    printf("父子链 %d 层（%s → %s）：动根 %+g/%+g/%+g → 叶子世界位置变 %+.4f/%+.4f/%+.4f，"
+           "最大误差 %.1e %s\n",
+           (int)(ecs_hierarchy_depth(world, leaf) + 1u), "lamp_rig", "lamp_light", (double)shift.x,
+           (double)shift.y, (double)shift.z, (double)(after.x - before.x),
+           (double)(after.y - before.y), (double)(after.z - before.z), (double)err,
+           (err < 1e-3f) ? "（通过）" : "（不符！）");
+    if (err >= 1e-3f) {
+        // 分两种情况报：根自己都没动 = 世界矩阵这一趟根本没重算；
+        // 根动了叶子没动 = 拓扑序或传播有问题。两者的修法完全不同，
+        // 只报"验证失败"的话下一个人得从第一条断点开始查。
+        LOG_ERROR("父子链验证未通过：根节点世界位置变了 %+.4f/%+.4f/%+.4f，"
+                  "同一次更新里叶子变 %+.4f/%+.4f/%+.4f，再更新一次叶子变 %+.4f/%+.4f/%+.4f",
+                  (double)(root_after.x - root_before.x), (double)(root_after.y - root_before.y),
+                  (double)(root_after.z - root_before.z), (double)(after.x - before.x),
+                  (double)(after.y - before.y), (double)(after.z - before.z),
+                  (double)(one_more.x - before.x), (double)(one_more.y - before.y),
+                  (double)(one_more.z - before.z));
+        return false;
+    }
+    return ecs_hierarchy_depth(world, leaf) >= 3u;
+}
+
+// 一帧里 2D 与 3D 都画出来了 —— 用"分别拿掉一样，像素必须变"来证明。
+//
+// 为什么不像 M4 那样直接对颜色：精灵和方块都画在同一个场景目标里，
+// 单张图上"哪个像素属于谁"说不清；而**做两次扰动**（摘掉精灵 / 挪走方块）
+// 之后差异像素落在哪里，就是它们各自画在哪里的证据。
+// 两次扰动的差异区几乎不重叠 = "互不干扰"（2D 盖住的地方，挪 3D 也看不出来）。
+static bool check_2d_and_3d(demo_t *demo, renderer_t *renderer, sprite_batch_t *batch,
+                            scene_submit_t *sub, shadow_map_t *shadow, frame_state_t *state,
+                            u32 width, u32 height)
+{
+    if (!renderer_scene_target_enabled(renderer)) {
+        LOG_ERROR("像素验证要求场景目标开着（环境里的 use_scene_target）");
+        return false;
+    }
+    scene_t *scene = demo->scene;
+    ecs_world_t *world = scene_world(scene);
+    const entity_t sprite_e = find_by_name(demo, "hud_sprite");
+    const entity_t cube_e = find_by_name(demo, "cube_spinning");
+    if (!entity_is_valid(sprite_e) || !entity_is_valid(cube_e)) {
+        LOG_ERROR("像素验证找不到 hud_sprite 或 cube_spinning");
+        return false;
+    }
+
+    // 读中间那半条横带：整幅 1280×720×4 是 3.7MB，而精灵与方块都在这条带子里。
+    const u32 band_y = height / 4u;
+    const u32 band_h = height / 2u;
+    const usize bytes = (usize)width * band_h * 4u;
+    const usize pixels = (usize)width * band_h;
+    arena_t *scratch = scene_scratch_arena(scene);
+    const arena_mark_t mark = arena_mark(scratch);
+    u8 *base = (u8 *)arena_alloc(scratch, bytes);
+    u8 *probe = (u8 *)arena_alloc(scratch, bytes);
+    // 每个像素一字节，记下"摘掉精灵时这里变过"。要这张表是因为"互不干扰"
+    // 的判据是**两次扰动的差异区不重叠**，而两帧都留住的话内存要翻倍。
+    u8 *changed_by_2d = (u8 *)arena_alloc_zero(scratch, pixels);
+    bool ok = (base != NULL && probe != NULL && changed_by_2d != NULL);
+
+    const scene_sprite_renderer_t *sr_src =
+        (const scene_sprite_renderer_t *)ecs_peek(world, sprite_e, demo->ids.sprite_renderer);
+    scene_sprite_renderer_t sprite_copy;
+    memset(&sprite_copy, 0, sizeof(sprite_copy));
+    if (ok && sr_src != NULL) {
+        sprite_copy = *sr_src;
+    }
+    ecs_transform_t *ct = (ecs_transform_t *)ecs_get(world, cube_e, demo->ids.transform);
+    vec3_t cube_original = vec3_zero();
+    quat_t cube_rotation = quat_identity();
+    vec3_t cube_scale = vec3_one();
+    if (ok && ct != NULL) {
+        cube_original = ct->position;
+        cube_rotation = ct->rotation;
+        cube_scale = ct->scale;
+    }
+
+    // 三次渲染都用 dt=0：相机不许在这中间偷偷转过去
+    if (ok) {
+        render_frame(demo, renderer, batch, sub, shadow, state, width, height, 0.0, 0ULL);
+        ok = renderer_read_scene_rect(renderer, 0u, band_y, width, band_h, base);
+    }
+    usize diff_2d = 0u;
+    if (ok) {
+        (void)ecs_remove(world, sprite_e, demo->ids.sprite_renderer);
+        render_frame(demo, renderer, batch, sub, shadow, state, width, height, 0.0, 1ULL);
+        ok = renderer_read_scene_rect(renderer, 0u, band_y, width, band_h, probe);
+        (void)ecs_add(world, sprite_e, demo->ids.sprite_renderer, &sprite_copy);
+        if (ok) {
+            for (usize p = 0u; p < pixels; ++p) {
+                if (memcmp(base + p * 4u, probe + p * 4u, 4u) != 0) {
+                    diff_2d++;
+                    changed_by_2d[p] = 1u;
+                }
+            }
+        }
+    }
+    usize diff_3d = 0u, overlap = 0u;
+    if (ok) {
+        // 把金属方块挪开 4 个单位（精灵留在原地）
+        (void)ecs_transform_set_local(
+            world, cube_e, vec3_add(cube_original, vec3_make(4.0f, 4.0f, 0.0f)), cube_rotation,
+            cube_scale);
+        render_frame(demo, renderer, batch, sub, shadow, state, width, height, 0.0, 2ULL);
+        ok = renderer_read_scene_rect(renderer, 0u, band_y, width, band_h, probe);
+        (void)ecs_transform_set_local(world, cube_e, cube_original, cube_rotation, cube_scale);
+        if (ok) {
+            for (usize p = 0u; p < pixels; ++p) {
+                if (memcmp(base + p * 4u, probe + p * 4u, 4u) != 0) {
+                    diff_3d++;
+                    overlap += (changed_by_2d[p] != 0u) ? 1u : 0u;
+                }
+            }
+        }
+    }
+    // 再验一条更贴近"动画到底有没有上屏"的：连跑两帧**真实增量**的时间，
+    // 画面必须变。这一条是给本轮修的那个调度缺陷准备的 —— 世界矩阵的求值
+    // 老挂在"有没有系统注册在 TRANSFORM 阶段"上，于是 Spin 在跑、计数器在涨，
+    // 屏幕上却是静止的。**只有读回像素能看见这种 bug。**
+    usize diff_motion = 0u;
+    if (ok) {
+        render_frame(demo, renderer, batch, sub, shadow, state, width, height, 1.0 / 60.0, 100ULL);
+        ok = renderer_read_scene_rect(renderer, 0u, band_y, width, band_h, probe);
+        memcpy(base, probe, bytes); // 以这一帧为基准
+        if (ok) {
+            render_frame(demo, renderer, batch, sub, shadow, state, width, height, 1.0 / 60.0,
+                         101ULL);
+            ok = renderer_read_scene_rect(renderer, 0u, band_y, width, band_h, probe);
+        }
+        if (ok) {
+            for (usize p = 0u; p < pixels; ++p) {
+                if (memcmp(base + p * 4u, probe + p * 4u, 4u) != 0) {
+                    diff_motion++;
+                }
+            }
+        }
+    }
+    arena_rewind(scratch, mark);
+
+    const usize band_pixels = (usize)width * band_h;
+    printf("同帧共存：横带 %u×%u = %llu 像素；摘掉精灵变了 %llu 个（2D），"
+           "挪走方块变了 %llu 个（3D），重叠 %llu 个\n",
+           (unsigned)width, (unsigned)band_h, (unsigned long long)band_pixels,
+           (unsigned long long)diff_2d, (unsigned long long)diff_3d,
+           (unsigned long long)overlap);
+    printf("动画上屏：连续两帧真实增量，%llu 个像素变了\n", (unsigned long long)diff_motion);
+    if (!ok) {
+        LOG_ERROR("像素读回失败");
+        return false;
+    }
+    // 2D/3D 各要占至少 200 个像素：少于这个数说明它压根没被画出来（或只擦了个边）
+    return diff_2d >= 200u && diff_3d >= 200u && diff_motion >= 200u;
 }
 
 // =============================================================================
@@ -1052,10 +1595,17 @@ int main(int argc, char **argv)
     }
 
     // ---- 场景 ----
-    const u32 capacity = (options.bench > 0u)
-                             ? ((options.bench > DEMO_MAX_BENCH_ENTS) ? DEMO_MAX_BENCH_ENTS
-                                                                      : options.bench)
-                             : 4096u;
+    //
+    // bench 的容量要留出精灵那一成：混排压测（M3/M4 的"含渲染 60 FPS"判据问的就是
+    // 1 万方块 + 1000 动图精灵**同一帧**）如果按 count 卡死容量，
+    // 精灵会一个都建不出来，而那看起来只是"容量到了"而不是"判据没测到"。
+    u32 capacity = (options.bench > 0u)
+                       ? ((options.bench > DEMO_MAX_BENCH_ENTS) ? DEMO_MAX_BENCH_ENTS
+                                                                : options.bench + options.bench / 10u + 64u)
+                       : 4096u;
+    if (capacity > DEMO_MAX_BENCH_ENTS) {
+        capacity = DEMO_MAX_BENCH_ENTS;
+    }
     scene_config_t scene_config;
     memset(&scene_config, 0, sizeof(scene_config));
     scene_config.allocator = &tracker.base;
@@ -1100,6 +1650,13 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
+    // 每次启动都验一遍"两种编码描述的是同一份数据"。失败就不往下走：
+    // 这个示例是 M5 的验收载体之一，它自己报的"通过"才算数。
+    if (!verify_format_equivalence(scene)) {
+        LOG_ERROR("格式自检未通过，退出");
+        goto cleanup;
+    }
+
     if (options.save) {
         if (!entity_is_valid(prefab_root) ||
             !scene_save_prefab(scene, prefab_root, options.prefab_path, NULL)) {
@@ -1112,7 +1669,7 @@ int main(int argc, char **argv)
     }
 
     if (options.bench > 0u) {
-        run_bench(&demo, &assets, renderer, &tracker, options.bench);
+        run_bench(&demo, &assets, renderer, &tracker, options.bench, options.vsync);
         exit_code = 0;
         goto cleanup;
     }
@@ -1167,11 +1724,27 @@ int main(int argc, char **argv)
 
     char  title[256];
     f64   last_title = 0.0;
-    bool  shadow_fitted = false;
     u32   frames = 0u;
-    f64   reload_ms = 0.0;
+    // 阴影要不要重拟合，交给 render_frame 自己记（它也是唯一用得到的地方）
+    frame_state_t fstate;
+    memset(&fstate, 0, sizeof(fstate));
 
-    printf("\n开始渲染。ESC 退出 / N 加柱子 / P 存盘 / R 重新加载\n");
+    // ---- M5 判据的现场验证（必须有 GPU 和完整场景，单元测试是离线的）----
+    if (!verify_parent_chain(&demo)) {
+        LOG_ERROR("父子链验证未通过");
+        goto cleanup;
+    }
+    if (options.check_pixel) {
+        u32 width = options.width, height = options.height;
+        platform_window_get_size(window, &width, &height);
+        exit_code = check_2d_and_3d(&demo, renderer, &batch, &sub, shadow_ready ? &shadow : NULL,
+                                    &fstate, width, height)
+                        ? 0
+                        : 1;
+        goto cleanup;
+    }
+
+    printf("\n开始渲染。ESC 退出 / N 加柱子 / P 存盘（两种编码）/ R 重新加载 / 1、2 换编码\n");
 
     while (true) {
         const platform_time_point_t frame_start = platform_time_now();
@@ -1194,26 +1767,45 @@ int main(int argc, char **argv)
         }
         if (input_key_pressed(input, KEY_P)) {
             scene_io_stats_t stats;
-            if (scene_save_binary(scene, options.scene_path, &stats)) {
-                printf("已存盘：%u 个实体 / %u 个组件\n", (unsigned)stats.entities_written,
-                       (unsigned)stats.components_written);
+            if (save_both_formats(scene, options.scene_path, &stats) &&
+                verify_format_equivalence(scene)) {
+                printf("已存盘（两种编码）：%u 个实体 / %u 个组件\n",
+                       (unsigned)stats.entities_written, (unsigned)stats.components_written);
             }
         }
+        // 重新加载有三种触发方式（R 原样重载、1 换二进制、2 换 JSON），
+        // 所以清世界 + 读档 + 绑资源 + 自检收在一个函数里：
+        // 抄三遍的话迟早有一遍忘了绑资源，而"忘了绑"的表现是物体全都不显示。
+        bool reload_wanted = false;
         if (input_key_pressed(input, KEY_R)) {
-            // 加载**不**清空世界（隐式副作用在调用点上看不出来），
-            // 所以"重新加载"就是显式的两行：先清，再读。
-            const f64 t0 = now_seconds();
-            ecs_world_clear(scene_world(scene));
-            scene_io_stats_t stats;
-            if (scene_load_binary(scene, options.scene_path, &stats)) {
-                (void)assets_bind_to_scene(scene, &assets);
-                reload_ms = (now_seconds() - t0) * 1000.0;
-                shadow_fitted = false;
+            reload_wanted = true;
+        }
+        if (input_key_pressed(input, KEY_1) && scene_path_is_json(options.scene_path)) {
+            char alt[512];
+            sibling_format_path(options.scene_path, alt, sizeof(alt));
+            if (set_path(options.scene_path, sizeof(options.scene_path), alt)) {
+                printf("改用二进制那份: %s\n", options.scene_path);
+                reload_wanted = true;
+            }
+        }
+        if (input_key_pressed(input, KEY_2) && !scene_path_is_json(options.scene_path)) {
+            char alt[512];
+            sibling_format_path(options.scene_path, alt, sizeof(alt));
+            if (set_path(options.scene_path, sizeof(options.scene_path), alt)) {
+                printf("改用 JSON 那份: %s\n", options.scene_path);
+                reload_wanted = true;
+            }
+        }
+        if (reload_wanted) {
+            f64 ms = 0.0;
+            u32 loaded = 0u;
+            if (reload_from(scene, &assets, options.scene_path, &ms, &loaded)) {
+                // 换了相机（重新加载会重建实体）就要重新适配阴影贴图的正交范围
+                fstate.shadow_fitted = false;
                 pillar_count = 0u;
-                printf("重新加载：%u 个实体 / %.2f ms\n", (unsigned)stats.entities_loaded,
-                       (double)reload_ms);
+                printf("重新加载：%u 个实体 / %.2f ms\n", (unsigned)loaded, (double)ms);
             } else {
-                LOG_ERROR("重新加载失败，画面保持上一帧的世界");
+                LOG_ERROR("重新加载失败（或格式自检未通过），画面保持上一帧的世界");
             }
         }
 
@@ -1221,44 +1813,10 @@ int main(int argc, char **argv)
         demo.last_spins = demo.spins_applied;
         demo.spins_applied = 0u;
 
-        // ---- 顺序：先跑世界，再 begin_frame，最后提交 ----
-        //
-        // 为什么 scene_submit_frame 不注册成 RENDER_SUBMIT 阶段的系统：
-        // renderer_begin_frame 需要一个相机，而相机要从**本帧已经算完的**世界矩阵里取。
-        // 提交若是系统，就必须先 begin_frame 再 update，那个相机只能是上一帧的。
-        // 一帧的延迟在 60fps 下看不出来，但"剔除和阴影用的是哪一帧的相机"
-        // 值得用一条注释解决，而不是留给下一个人猜。
-        (void)ecs_world_update(scene_world(scene), (f32)delta);
-
         u32 width = options.width, height = options.height;
         platform_window_get_size(window, &width, &height);
-        const f32 aspect = (height > 0u) ? (f32)width / (f32)height : 1.0f;
-
-        camera_t camera = camera_default();
-        const bool has_camera = scene_submit_active_camera(&sub, aspect, &camera);
-        frame_desc_t frame;
-        fill_frame_desc(&frame, width, height, delta, (u64)frames);
-        renderer_begin_frame(renderer, &camera, &frame);
-
-        sprite_batch_begin(&batch);
-        scene_submit_frame(&sub, renderer, aspect);
-        sprite_batch_end(&batch);
-
-        if (shadow_ready) {
-            if (!shadow_fitted && has_camera) {
-                // 主光的朝向来自场景（存档里的那盏平行光）。
-                // 第一帧提交之后 renderer 里就有了它，这时候拟合一次阴影视锥。
-                const light_t *key = light_set_get(renderer_lights(renderer), 0u);
-                if (key != NULL && key->cast_shadow) {
-                    shadow_map_fit_directional(&shadow, key, vec3_make(0.0f, 1.5f, 0.0f), 22.0f);
-                    shadow_fitted = true;
-                }
-            }
-            if (shadow_fitted) {
-                shadow_map_render(&shadow, renderer);
-            }
-        }
-        renderer_end_frame(renderer);
+        render_frame(&demo, renderer, &batch, &sub, shadow_ready ? &shadow : NULL, &fstate, width,
+                     height, delta, (u64)frames);
 
         frames++;
         if (options.frames > 0u && frames >= options.frames) {
