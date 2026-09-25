@@ -43,6 +43,11 @@ struct scene_t {
     allocator_t *alloc;
     renderer_t  *renderer;
 
+    // 存档缓冲与加载期临时表都走这里：一次性整体丢弃，
+    // 不需要每条错误路径各自记得 free
+    arena_t scratch;
+    bool    scratch_ready;
+
     ecs_world_t           *world;
     scene_component_ids_t  ids;
     bool                   components_registered;
@@ -121,7 +126,19 @@ scene_t *scene_create(const scene_config_t *config)
         config->allocator->free(config->allocator, scene, sizeof(scene_t));
         return NULL;
     }
+
+    if (!arena_init(&scene->scratch, config->allocator, 1024u * 1024u, "scene_scratch")) {
+        ecs_world_destroy(scene->world);
+        config->allocator->free(config->allocator, scene, sizeof(scene_t));
+        return NULL;
+    }
+    scene->scratch_ready = true;
     return scene;
+}
+
+arena_t *scene_scratch_arena(scene_t *scene)
+{
+    return (scene != NULL && scene->scratch_ready) ? &scene->scratch : NULL;
 }
 
 void scene_destroy(scene_t *scene)
@@ -137,6 +154,10 @@ void scene_destroy(scene_t *scene)
     if (scene->world != NULL) {
         ecs_world_destroy(scene->world);
         scene->world = NULL;
+    }
+    if (scene->scratch_ready) {
+        arena_destroy(&scene->scratch);
+        scene->scratch_ready = false;
     }
     alloc->free(alloc, scene, sizeof(scene_t));
 }
@@ -353,10 +374,14 @@ bool scene_add_mesh_handle(scene_t *scene, const char *name, mesh_handle_t mesh,
 
     for (u32 i = 0; i < SCENE_MAX_MESHES; ++i) {
         if (scene->meshes[i].used && strncmp(scene->meshes[i].name, slot, SCENE_RESOURCE_NAME_MAX) == 0) {
+            // 同名重新登记 = 覆盖句柄。加载路径依赖这个行为：
+            // 存档里程序化几何只记名字（没有路径），先占位建表，
+            // 再由应用用同名把真实的 GPU 句柄填进来。
+            scene->meshes[i].handle = mesh;
             if (out_id != NULL) {
                 *out_id = i;
             }
-            return true; // 按名字去重
+            return true;
         }
     }
     for (u32 i = 0; i < SCENE_MAX_MESHES; ++i) {
@@ -479,6 +504,7 @@ bool scene_add_atlas_handle(scene_t *scene, const char *name, texture_handle_t t
     for (u32 i = 0; i < SCENE_MAX_ATLASES; ++i) {
         if (scene->atlases[i].used &&
             strncmp(scene->atlases[i].name, slot, SCENE_RESOURCE_NAME_MAX) == 0) {
+            scene->atlases[i].handle = texture; // 同名覆盖，理由同网格表
             if (out_id != NULL) {
                 *out_id = i;
             }
@@ -558,6 +584,16 @@ texture_handle_t scene_atlas_handle(const scene_t *scene, u32 id)
 const char *scene_atlas_name(const scene_t *scene, u32 id)
 {
     return scene_atlas_id_valid(scene, id) ? scene->atlases[id].name : NULL;
+}
+
+// 序列化要按"名字 + 来源路径"往返资源表，所以这两个只读访问器是必需的：
+// 没有它们，加载路径就得去掏场景内部数组 —— 那等于把资源表的布局泄露成公共知识。
+const char *scene_atlas_path(const scene_t *scene, u32 id)
+{
+    if (!scene_atlas_id_valid(scene, id) || scene->atlases[id].path[0] == '\0') {
+        return NULL;
+    }
+    return scene->atlases[id].path;
 }
 
 u32 scene_atlas_count(const scene_t *scene)
@@ -664,6 +700,14 @@ const material_t *scene_material(const scene_t *scene, u32 id)
 const char *scene_material_name(const scene_t *scene, u32 id)
 {
     return scene_material_id_valid(scene, id) ? scene->materials[id].name : NULL;
+}
+
+const char *scene_material_pipeline(const scene_t *scene, u32 id)
+{
+    if (!scene_material_id_valid(scene, id) || scene->materials[id].pipeline_name[0] == '\0') {
+        return NULL;
+    }
+    return scene->materials[id].pipeline_name;
 }
 
 u32 scene_material_count(const scene_t *scene)

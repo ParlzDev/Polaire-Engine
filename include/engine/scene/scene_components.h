@@ -48,8 +48,8 @@ _Static_assert(ENGINE_OFFSETOF(scene_mesh_renderer_t, layer) == 8, "字段表漂
 _Static_assert(ENGINE_OFFSETOF(scene_mesh_renderer_t, cast_shadow) == 12, "字段表漂移");
 
 static const ecs_field_desc_t k_mesh_renderer_fields[] = {
-    { "mesh", 0u, ECS_FIELD_U32, 1u, 0u, 0u },
-    { "material", 4u, ECS_FIELD_U32, 1u, 0u, 0u },
+    { "mesh", 0u, ECS_FIELD_MESH_REF, 1u, 0u, 0u },
+    { "material", 4u, ECS_FIELD_MATERIAL_REF, 1u, 0u, 0u },
     { "layer", 8u, ECS_FIELD_U32, 1u, 0u, 0u },
     { "cast_shadow", 12u, ECS_FIELD_BOOL, 1u, 0u, 0u },
 };
@@ -92,7 +92,7 @@ static const ecs_field_desc_t k_sprite_renderer_fields[] = {
     { "size", 16u, ECS_FIELD_VEC2, 1u, 0u, 0u },
     { "uv_min", 24u, ECS_FIELD_VEC2, 1u, 0u, 0u },
     { "uv_max", 32u, ECS_FIELD_VEC2, 1u, 0u, 0u },
-    { "atlas", 40u, ECS_FIELD_U32, 1u, 0u, 0u },
+    { "atlas", 40u, ECS_FIELD_ATLAS_REF, 1u, 0u, 0u },
     { "layer", 44u, ECS_FIELD_U32, 1u, 0u, 0u },
 };
 

@@ -64,6 +64,19 @@ typedef enum ecs_field_kind_t {
     ECS_FIELD_ENTITY,  // entity_t：序列化成 dense id，加载时重映射
     ECS_FIELD_DENSE_ID, // dense_id_t：允许指向场景外（读回时映射不到就是 NONE）
     ECS_FIELD_STRING,   // 内联 char[N]，需要 capacity
+
+    // 资源引用：内存里是 scene 资源表的 u32 下标，**文件里是名字**。
+    //
+    // 为什么不落索引：手改存档时在资源列表中间插一行，后面所有索引就全体错位，
+    // 而且**读得出来** —— 只是"这个模型穿了那个模型的皮"。
+    // 存名字让人手编辑仍然安全，代价只是加载时多一次按名字查表。
+    //
+    // 这三个种类是"给 ECS 用的序列化知识"，看着像越层，但反过来更糟：
+    // 若让场景层自己认字段名来决定"这个 u32 要不要翻译成名字"，
+    // 就等于在 ECS 之外复制一份字段表 —— 两份表必然漂移。
+    ECS_FIELD_MESH_REF,
+    ECS_FIELD_MATERIAL_REF,
+    ECS_FIELD_ATLAS_REF,
     ECS_FIELD_KIND_COUNT
 } ecs_field_kind_t;
 

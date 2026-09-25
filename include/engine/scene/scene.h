@@ -88,6 +88,13 @@ typedef struct scene_config_t {
 scene_t *scene_create(const scene_config_t *config);
 void     scene_destroy(scene_t *scene);
 
+// 场景自带的 scratch arena：存档缓冲、加载期的 dense 映射表这类
+// "用完就整体丢掉"的临时内存都走这里，所以它们不需要各自的分配/释放配对，
+// 也就不会有"某条错误路径忘了 free"这种泄漏。
+// 与 renderer_frame_arena 的区别：那个每帧 reset，这个跨帧存活但不能长命 ——
+// 序列化可能一次就要几百 KB，塞进帧 arena 会把帧预算带偏。
+arena_t *scene_scratch_arena(scene_t *scene);
+
 // 注册场景用到的全部组件类型（ECS 内置的三个 + 五个渲染向的）。
 // 幂等：重复调用只是取回同一批 id。06_scene、测试、prefab 都先调它。
 bool scene_register_components(scene_t *scene, scene_component_ids_t *out_ids);
@@ -133,6 +140,10 @@ const char *scene_mesh_name(const scene_t *scene, u32 id);
 const char *scene_mesh_path(const scene_t *scene, u32 id);
 const char *scene_atlas_name(const scene_t *scene, u32 id);
 const char *scene_material_name(const scene_t *scene, u32 id);
+// 资源表的两条"来源"信息，序列化用：从文件来的记 path，程序化几何 path 为空。
+// 管线索引同理 —— 存档里必须是名字，句柄跨运行/跨后端都会变。
+const char *scene_atlas_path(const scene_t *scene, u32 id);
+const char *scene_material_pipeline(const scene_t *scene, u32 id);
 
 mesh_handle_t   scene_mesh_handle(const scene_t *scene, u32 id);
 texture_handle_t scene_atlas_handle(const scene_t *scene, u32 id);

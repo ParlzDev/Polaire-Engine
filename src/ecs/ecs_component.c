@@ -27,6 +27,9 @@ usize ecs_field_kind_size(ecs_field_kind_t kind)
     case ECS_FIELD_QUAT: return sizeof(quat_t);
     case ECS_FIELD_ENTITY: return sizeof(entity_t);
     case ECS_FIELD_DENSE_ID: return sizeof(dense_id_t);
+    case ECS_FIELD_MESH_REF:
+    case ECS_FIELD_MATERIAL_REF:
+    case ECS_FIELD_ATLAS_REF: return sizeof(u32); // 内存里是资源表下标
     case ECS_FIELD_STRING: return 1u; // count/容量 以字节计
     case ECS_FIELD_KIND_COUNT: break;
     }
@@ -48,6 +51,9 @@ const char *ecs_field_kind_name(ecs_field_kind_t kind)
     case ECS_FIELD_QUAT: return "quat";
     case ECS_FIELD_ENTITY: return "entity";
     case ECS_FIELD_DENSE_ID: return "dense_id";
+    case ECS_FIELD_MESH_REF: return "mesh_ref";
+    case ECS_FIELD_MATERIAL_REF: return "material_ref";
+    case ECS_FIELD_ATLAS_REF: return "atlas_ref";
     case ECS_FIELD_STRING: return "string";
     case ECS_FIELD_KIND_COUNT: break;
     }

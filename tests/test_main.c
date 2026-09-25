@@ -49,6 +49,7 @@ int main(int argc, char **argv)
 
     // M5：ECS + 场景
     test_ecs_register();
+    test_scene_io_register();
 
     const char *filter = (argc > 1) ? argv[1] : NULL;
     const int   result = test_run_all(filter);
