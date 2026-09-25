@@ -67,6 +67,24 @@ void scene_submit_destroy(scene_submit_t *sub)
 
 // ---------------------------------------------------------------- 相机
 
+// 世界矩阵的 3x3 可能带缩放（相机挂在被缩放的父节点下面完全是合理场景），
+// 而 quat_from_mat3 假设输入是纯旋转。所以逐列归一化后再交给它。
+// 某一列退化成零（缩放为 0）时直接给单位朝向：一个可解释的默认值，
+// 比从退化基里硬解出一个乱转的相机好归因得多。
+static mat3_t basis_without_scale(mat4_t m)
+{
+    mat3_t r;
+    for (u32 i = 0u; i < 3u; ++i) {
+        const vec3_t axis = vec3_make(m.col[i].x, m.col[i].y, m.col[i].z);
+        const f32    len = vec3_length(axis);
+        if (len <= 1e-6f) {
+            return mat3_identity();
+        }
+        r.col[i] = vec3_scale(axis, 1.0f / len);
+    }
+    return r;
+}
+
 bool scene_submit_active_camera(const scene_submit_t *sub, f32 aspect, camera_t *out)
 {
     if (sub == NULL || out == NULL || sub->camera_query == NULL) {
@@ -106,7 +124,14 @@ bool scene_submit_active_camera(const scene_submit_t *sub, f32 aspect, camera_t 
     memset(out, 0, sizeof(*out));
     out->position = vec3_make(best_wt.model.col[3].x, best_wt.model.col[3].y,
                               best_wt.model.col[3].z);
-    out->rotation = quat_identity(); // camera_from_* 由调用方按朝向决定；这里给单位
+    // 朝向直接从世界矩阵的 3x3 取，而不是让调用方再传一次 yaw/pitch：
+    // 相机既然是一个实体，它的朝向就该和别的实体一样由父子链算出来 ——
+    // "轨道相机"因此只是"相机是某个会转的节点的子节点"，不需要特例代码。
+    //
+    // 取之前先把三个基向量归一化：矩阵可能带缩放（相机挂在被缩放的节点下面
+    // 是完全合理的场景），而 quat_from_mat3 假设输入是纯旋转。
+    // 不归一化的话缩放会污染四元数，表现是"画面歪了但没人改过旋转"。
+    out->rotation = quat_normalize(quat_from_mat3(basis_without_scale(best_wt.model)));
     out->projection = (best_params.projection == (u32)SCENE_CAMERA_ORTHOGRAPHIC)
                           ? CAMERA_PROJECTION_ORTHOGRAPHIC
                           : CAMERA_PROJECTION_PERSPECTIVE;

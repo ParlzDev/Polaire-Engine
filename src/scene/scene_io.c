@@ -1078,12 +1078,12 @@ static bool bin_read_resource_section(bio_reader_t *r, scene_t *scene, u32 count
                 return false;
             }
         } else {
-            // 没有路径 = 程序化几何：这里先按名字占位，等应用用同名把真实句柄填进来
-            // （scene_add_*_handle 同名时覆盖句柄，见 scene.c）。
-            const bool ok = is_mesh
-                                ? scene_add_mesh_handle(scene, rec.name, MESH_HANDLE_INVALID, &id)
-                                : scene_add_atlas_handle(scene, rec.name, TEXTURE_HANDLE_INVALID,
-                                                         &id);
+            // 没有路径 = 程序化几何：先按名字占位（句柄留给应用绑，见
+            // scene_add_*_pending 的注释）。这里**不能**用 *_handle + INVALID：
+            // 连着渲染器的场景会拒绝无效句柄，于是"存档里有一个程序化网格"
+            // 就等于"这份存档在有 GPU 的场景里读不出来" —— 那正好是要防的反面。
+            const bool ok = is_mesh ? scene_add_mesh_pending(scene, rec.name, &id)
+                                    : scene_add_atlas_pending(scene, rec.name, &id);
             if (!ok) {
                 return false;
             }

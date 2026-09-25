@@ -120,11 +120,21 @@ const char *scene_pipeline_name_at(const scene_t *scene, u32 index);
 bool scene_add_mesh_from_file(scene_t *scene, const char *name, const char *path, u32 *out_id);
 // 用已有句柄登记一个网格（程序化几何走这条路，避免为了测试硬造文件）。
 bool scene_add_mesh_handle(scene_t *scene, const char *name, mesh_handle_t mesh, u32 *out_id);
+// 只登记名字，句柄留给应用之后绑。
+//
+// 加载路径用它：存档里"程序化几何"这一类资源没有文件路径，引擎无从创建 GPU 对象，
+// 但**必须**先把表的槽位建出来 —— 组件里存的是表下标，槽位不在，引用就落空。
+// 所以这里的"句柄暂时无效"不是将就，而是这套三层结构（存档→名字、运行期→下标、
+// GPU→句柄）的必要中间态。绑定完成后用 scene_pending_resource_count 核对有没有漏。
+bool scene_add_mesh_pending(scene_t *scene, const char *name, u32 *out_id);
 
 // 从文件加载纹理/图集（PNG/TGA 等由 stb_image 解码，sRGB 由后端决定）。
 bool scene_add_atlas_from_file(scene_t *scene, const char *name, const char *path, u32 *out_id);
 bool scene_add_atlas_handle(scene_t *scene, const char *name, texture_handle_t texture,
                             u32 *out_id);
+bool scene_add_atlas_pending(scene_t *scene, const char *name, u32 *out_id);
+// 还有多少个"名字已登记、句柄没绑定"的资源。0 = 全部绑定完成。
+u32 scene_pending_resource_count(const scene_t *scene);
 
 // 材质：pipeline 用**名字**引用，在这里就解析成句柄；解析不到直接失败，
 // 不等渲染时才出现"用了默认管线"这种说不清的状态。

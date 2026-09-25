@@ -364,7 +364,8 @@ const char *scene_pipeline_name_at(const scene_t *scene, u32 index)
 
 // ---------------------------------------------------------------- 网格
 
-bool scene_add_mesh_handle(scene_t *scene, const char *name, mesh_handle_t mesh, u32 *out_id)
+static bool scene_add_mesh_named(scene_t *scene, const char *name, mesh_handle_t mesh,
+                                 bool require_valid, u32 *out_id)
 {
     ASSERT(scene != NULL);
     char slot[SCENE_RESOURCE_NAME_MAX];
@@ -374,7 +375,7 @@ bool scene_add_mesh_handle(scene_t *scene, const char *name, mesh_handle_t mesh,
     // 离线模式（renderer == NULL）只登记名字与下标，没有 GPU 可以问句柄有效性。
     // 序列化单测就走这条路：它要验的是"存出去能读回来且逐字节一致"，
     // 不需要真的画出来。
-    if (scene->renderer != NULL && !mesh_is_valid(scene->renderer, mesh)) {
+    if (require_valid && scene->renderer != NULL && !mesh_is_valid(scene->renderer, mesh)) {
         LOG_ERROR("登记了一个无效网格句柄：%s", name);
         return false;
     }
@@ -405,6 +406,16 @@ bool scene_add_mesh_handle(scene_t *scene, const char *name, mesh_handle_t mesh,
     }
     LOG_ERROR("网格表已满（%u）", SCENE_MAX_MESHES);
     return false;
+}
+
+bool scene_add_mesh_handle(scene_t *scene, const char *name, mesh_handle_t mesh, u32 *out_id)
+{
+    return scene_add_mesh_named(scene, name, mesh, true, out_id);
+}
+
+bool scene_add_mesh_pending(scene_t *scene, const char *name, u32 *out_id)
+{
+    return scene_add_mesh_named(scene, name, MESH_HANDLE_INVALID, false, out_id);
 }
 
 bool scene_add_mesh_from_file(scene_t *scene, const char *name, const char *path, u32 *out_id)
@@ -496,18 +507,20 @@ u32 scene_mesh_count(const scene_t *scene)
 
 // ---------------------------------------------------------------- 图集
 
-bool scene_add_atlas_handle(scene_t *scene, const char *name, texture_handle_t texture,
-                            u32 *out_id)
+static bool scene_add_atlas_named(scene_t *scene, const char *name, texture_handle_t texture,
+                                 bool require_valid, u32 *out_id)
 {
     ASSERT(scene != NULL);
     char slot[SCENE_RESOURCE_NAME_MAX];
     if (!scene_copy_name(slot, name, "图集")) {
         return false;
     }
-    if (scene->renderer != NULL && !texture_is_valid(scene->renderer, texture)) {
+    // 见 scene_add_mesh_named 的注释：pending 路径就是要允许"句柄还没有"。
+    if (require_valid && scene->renderer != NULL && !texture_is_valid(scene->renderer, texture)) {
         LOG_ERROR("登记了一个无效纹理句柄：%s", name);
         return false;
     }
+
     for (u32 i = 0; i < SCENE_MAX_ATLASES; ++i) {
         if (scene->atlases[i].used &&
             strncmp(scene->atlases[i].name, slot, SCENE_RESOURCE_NAME_MAX) == 0) {
@@ -532,6 +545,40 @@ bool scene_add_atlas_handle(scene_t *scene, const char *name, texture_handle_t t
     }
     LOG_ERROR("图集表已满（%u）", SCENE_MAX_ATLASES);
     return false;
+}
+
+bool scene_add_atlas_handle(scene_t *scene, const char *name, texture_handle_t texture,
+                            u32 *out_id)
+{
+    return scene_add_atlas_named(scene, name, texture, true, out_id);
+}
+
+bool scene_add_atlas_pending(scene_t *scene, const char *name, u32 *out_id)
+{
+    return scene_add_atlas_named(scene, name, TEXTURE_HANDLE_INVALID, false, out_id);
+}
+
+// 还差多少个 GPU 对象没绑定。06_scene 加载完打印它一次：
+// "场景读成功了但画面是空的"这种现场，有这个数就能一句话分开。
+u32 scene_pending_resource_count(const scene_t *scene)
+{
+    if (scene == NULL) {
+        return 0u;
+    }
+    u32 pending = 0u;
+    for (u32 i = 0; i < SCENE_MAX_MESHES; ++i) {
+        if (scene->meshes[i].used && scene->meshes[i].path[0] == '\0' &&
+            scene->meshes[i].handle == MESH_HANDLE_INVALID) {
+            pending++;
+        }
+    }
+    for (u32 i = 0; i < SCENE_MAX_ATLASES; ++i) {
+        if (scene->atlases[i].used && scene->atlases[i].path[0] == '\0' &&
+            scene->atlases[i].handle == TEXTURE_HANDLE_INVALID) {
+            pending++;
+        }
+    }
+    return pending;
 }
 
 bool scene_add_atlas_from_file(scene_t *scene, const char *name, const char *path, u32 *out_id)
