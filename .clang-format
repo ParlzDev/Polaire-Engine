@@ -1,0 +1,33 @@
+# MyEngine 代码风格 —— 与 AI_PROMPT.md 中的约定保持一致
+# 用法：clang-format -i <file>
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+
+# 指针星号贴近变量名：`u8* p` 写成 `u8 *p` 还是 `u8* p` 见下
+PointerAlignment: Right
+
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterStruct: false
+  AfterUnion: false
+  AfterEnum: false
+  AfterControlStatement: false
+  BeforeElse: false
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+AlignConsecutiveMacros: true
+AlignConsecutiveAssignments: false
+
+SpaceAfterCStyleCast: false
+SortIncludes: true
+IncludeBlocks: Preserve

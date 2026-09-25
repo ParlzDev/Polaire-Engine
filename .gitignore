@@ -1,0 +1,30 @@
+# ---- 构建产物 ----
+build/
+out/
+cmake-build-*/
+*.obj
+*.o
+*.lib
+*.a
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+
+# ---- 工具缓存 ----
+.cache/
+.clangd/
+.vs/
+.vscode/
+.idea/
+.workbuddy-ai/
+
+# ---- 运行时产物 ----
+*.log
+logs/
+*.bin
+screenshots/
+
+# compile_commands.json 由 CMake 生成到 build/ 下，仓库根目录若出现也忽略
+/compile_commands.json
