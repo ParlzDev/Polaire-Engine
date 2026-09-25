@@ -336,33 +336,49 @@ u32 ecs_world_update(ecs_world_t *world, f32 delta_seconds)
     }
 
     u32 ran = 0u;
-    ecs_stage_t current_stage = ECS_STAGE_INPUT;
 
-    for (u32 i = 0; i < world->system_count; ++i) {
-        ecs_system_t *s = &world->systems[i];
-        if (!s->registered || !s->enabled) {
-            continue;
-        }
-        if (s->desc.stage != current_stage) {
-            // stage 边界：先把上一阶段积压的结构变更落地，
-            // 这样新阶段看到的组件状态是完整的。
-            (void)ecs_flush_commands(world);
-            current_stage = s->desc.stage;
-        }
-        if (s->desc.stage == ECS_STAGE_TRANSFORM) {
-            // 世界矩阵求值是内置阶段而非可注销的系统：
-            // 几乎所有提交系统都依赖它，让它可被忘记注册只会制造空白帧。
+    // 按**阶段**走，而不是按"系统列表里下一个是谁"走。
+    //
+    // 原来这里是遍历系统数组、看到 stage 变了就做一件事：在遇到第一个 TRANSFORM
+    // 阶段的系统时顺手求值世界矩阵。后果是"没有任何系统注册在 TRANSFORM 阶段"
+    // 的世界里，世界矩阵**永远不重算** —— 表现不是崩溃也不是报错，而是
+    // "改了 transform，画面不动"：父子链上动父节点，子节点原地不动。
+    // 06_scene 正好就是这个情况（提交发生在 ecs_world_update 之外，
+    // 而示例只在 LOGIC 阶段注册了 Spin），所以这条缺陷藏了整整一个阶段。
+    //
+    // 世界矩阵求值是**阶段本身**的语义，不是某个系统的副作用：几乎所有提交/剔除
+    // 都依赖它，让它可被"忘记注册"抹掉只会制造一个静默的空白行为。
+    u32 index = 0u;
+    for (u32 st = 0u; st < (u32)ECS_STAGE_COUNT; ++st) {
+        // 阶段边界：先把上一阶段积压的结构变更落地，
+        // 这样新阶段看到的组件状态是完整的。空队列时这个调用是免费的。
+        (void)ecs_flush_commands(world);
+
+        if (st == (u32)ECS_STAGE_TRANSFORM) {
             ecs_update_world_transforms(world);
         }
-        s->desc.update(world, s->desc.user, delta_seconds);
-        s->run_count++;
-        ran++;
+
+        // 系统数组按 (stage, priority, name) 全序排好，所以这里是一次线性推进
+        while (index < world->system_count) {
+            ecs_system_t *s = &world->systems[index];
+            if ((u32)s->desc.stage != st) {
+                break; // 排序保证：不是这一阶段的都在后面
+            }
+            index++;
+            if (!s->registered || !s->enabled) {
+                continue;
+            }
+            s->desc.update(world, s->desc.user, delta_seconds);
+            s->run_count++;
+            ran++;
+        }
     }
 
     (void)ecs_flush_commands(world);
 
-    // RELATION 阶段之后可能又出现新的脏标记，所以这里再补一次变换求值。
-    if (world->hierarchy_dirty && world->system_count > 0u) {
+    // CLEANUP 阶段之后又出现新的脏标记时补一次（提交发生在 world_update 之外的
+    // 调用方要看到最新矩阵）。没有脏标记时这只是一次布尔判断。
+    if (world->hierarchy_dirty) {
         ecs_update_world_transforms(world);
     }
 

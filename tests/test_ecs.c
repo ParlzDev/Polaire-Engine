@@ -794,6 +794,60 @@ static void hierarchy_parent_moves_children(void)
     ecs_fixture_end(&fx);
 }
 
+// 走**每帧入口**而不是直接调 ecs_update_world_transforms：上面那条测的是求值数学，
+// 这一条测的是"什么时候会去求值"。区别很重要 —— 老实现里世界矩阵的求值挂在
+// "遇到第一个注册在 TRANSFORM 阶段的系统"上，于是没有任何系统的世界里，
+// 改了 transform 画面永远不动。那条路径上所有单测都是绿的，因为它们都直接调了
+// 内部函数，绕开了真正会出问题的那一层。
+//
+// 症状不是崩溃也不是报错，而是"数据对了，屏幕上不动"：父子链、动画、
+// 相机挂点全部静默失效，最难归因的一类。
+static void hierarchy_world_transform_updates_via_world_update(void)
+{
+    ecs_fixture_t fx;
+    ecs_fixture_begin(&fx, "hierarchy_entry", 32u);
+
+    // 一个系统都不注册 —— 这正是要复现的那个配置
+    EXPECT_EQ_U64(ecs_system_count(fx.world), 0u);
+
+    const entity_t root = ecs_create_entity(fx.world);
+    const entity_t child = ecs_create_entity(fx.world);
+    const entity_t leaf = ecs_create_entity(fx.world);
+    EXPECT_TRUE(ecs_transform_set_local(fx.world, root, vec3_make(1.0f, 0.0f, 0.0f),
+                                        quat_identity(), vec3_one()));
+    EXPECT_TRUE(ecs_transform_set_local(fx.world, child, vec3_make(0.0f, 2.0f, 0.0f),
+                                        quat_identity(), vec3_one()));
+    EXPECT_TRUE(ecs_transform_set_local(fx.world, leaf, vec3_make(0.0f, 0.0f, 3.0f),
+                                        quat_identity(), vec3_one()));
+    EXPECT_TRUE(ecs_set_parent(fx.world, child, root));
+    EXPECT_TRUE(ecs_set_parent(fx.world, leaf, child));
+
+    EXPECT_EQ_U64(ecs_world_update(fx.world, 0.0f), 0u); // 没有系统，但阶段仍然要走完
+    ecs_world_transform_t wt;
+    EXPECT_TRUE(ecs_transform_get_world(fx.world, leaf, &wt));
+    EXPECT_NEAR((double)wt.model.col[3].x, 1.0, 1e-4);
+    EXPECT_NEAR((double)wt.model.col[3].y, 2.0, 1e-4);
+    EXPECT_NEAR((double)wt.model.col[3].z, 3.0, 1e-4);
+
+    // 只改本地变换（不碰结构、不碰任何系统），一次 update 之后叶子必须跟上。
+    // 三层链要"每帧传播一层"的话，这里读到的还是旧值 —— 老实现正是这样。
+    EXPECT_TRUE(ecs_transform_set_local(fx.world, root, vec3_make(9.0f, 8.0f, 7.0f),
+                                        quat_identity(), vec3_one()));
+    EXPECT_EQ_U64(ecs_world_update(fx.world, 0.0f), 0u);
+    EXPECT_TRUE(ecs_transform_get_world(fx.world, leaf, &wt));
+    // 累加：root(9,8,7) + child 本地(0,2,0) + leaf 本地(0,0,3)
+    EXPECT_NEAR((double)wt.model.col[3].x, 9.0, 1e-4);
+    EXPECT_NEAR((double)wt.model.col[3].y, 10.0, 1e-4);
+    EXPECT_NEAR((double)wt.model.col[3].z, 10.0, 1e-4);
+
+    // 同一次 update 里，中间层也要是新的（防"只更新了根和叶"这种巧合通过）
+    EXPECT_TRUE(ecs_transform_get_world(fx.world, child, &wt));
+    EXPECT_NEAR((double)wt.model.col[3].x, 9.0, 1e-4);
+    EXPECT_NEAR((double)wt.model.col[3].y, 10.0, 1e-4);
+
+    ecs_fixture_end(&fx);
+}
+
 // 尺度必须沿链累乘：只看父矩阵不看缩放，是非均匀缩放下最常见的错。
 static void hierarchy_scale_composes(void)
 {
@@ -1147,6 +1201,8 @@ void test_ecs_register(void)
     test_register("ecs", "command_overflow_is_reported", command_overflow_is_reported);
     test_register("ecs", "parent_moves_children", hierarchy_parent_moves_children);
     test_register("ecs", "scale_composes", hierarchy_scale_composes);
+    test_register("ecs", "world_transform_updates_via_world_update",
+                  hierarchy_world_transform_updates_via_world_update);
     test_register("ecs", "rejects_cycles", hierarchy_rejects_cycles);
     test_register("ecs", "rejects_excessive_depth", hierarchy_rejects_excessive_depth);
     test_register("ecs", "rebuild_is_lazy_and_counted", hierarchy_rebuild_is_lazy_and_counted);
