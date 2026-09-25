@@ -108,6 +108,11 @@ typedef struct json_writer_t {
     // 以及收尾的 } / ] 前面要不要换行。用栈式的数组而不是"记住上一个
     // token"，是因为容器会嵌套，而深度有上限所以数组够用。
     bool empty[JSON_MAX_DEPTH + 1u];
+    // 同形状的第二个数组：这一层是不是"成员挤在同一行"。
+    // 只有"短数值数组"会用（向量的三个分量、八个槽位名），因为它们在一行里
+    // 才是可读的；把 [0, -0.3, 0] 拆成四行会让场景文件的行数翻几倍,
+    // 而那种文件的主要用途是人眼扫一遍 + 手改一个数。
+    bool inline_at[JSON_MAX_DEPTH + 1u];
     bool pending_key; // 刚写完 "key": ，紧跟的值不该再写分隔符
 } json_writer_t;
 
@@ -127,6 +132,11 @@ bool json_write_string_n(json_writer_t *w, const char *text, usize length);
 bool json_begin_object(json_writer_t *w);
 bool json_end_object(json_writer_t *w);
 bool json_begin_array(json_writer_t *w);
+// 成员写在**同一行**的数组：`[0, -0.3, 0]`。
+// 给"两三个短数值"那种容器用 —— 向量的三个分量各占一行会让场景文件涨成
+// 原来的三倍长，而它的主要用途是人眼扫一遍再手改其中一个数。
+// 只有数组有这一档：对象的键值对没有"三个字符一行"的阅读场景。
+bool json_begin_array_inline(json_writer_t *w);
 bool json_end_array(json_writer_t *w);
 // 对象成员：先写 key，紧接着写那个值（值用上面任意一个 write_*）。
 bool json_write_key(json_writer_t *w, const char *key);

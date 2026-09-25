@@ -19,13 +19,17 @@
 #include "engine/render/mesh.h"
 #include "engine/render/texture.h"
 
+// 字段表、记录结构、尺寸规则 —— 与 scene_json.c 共用同一份（那里的注释说明了
+// 为什么绝不允许有两份）。
+#include "scene_io_internal.h"
+
 // ============================================================ 上下文与尺寸
 
 typedef struct scene_io_ctx_t {
-    scene_t         *scene;
-    ecs_world_t     *world;
-    const entity_t  *dense_map; // 下标 = 文件里的 dense id；写侧为 NULL
-    u32              dense_count;
+    scene_t          *scene;
+    ecs_world_t      *world;
+    const entity_t   *dense_map; // 下标 = 文件里的 dense id；写侧为 NULL
+    u32               dense_count;
     scene_io_stats_t *stats;
 
     // 写侧专用：非 NULL 表示这份存档只覆盖这一段实体（预制体），
@@ -51,40 +55,6 @@ static u32 scene_io_write_dense(const scene_io_ctx_t *ctx, entity_t e)
         }
     }
     return (u32)ECS_DENSE_NONE;
-}
-
-// 一种字段在**文件里**占多少字节。
-//
-// 和内存大小不等的只有 vec3：内存里 16（含对齐用的 pad），文件里 12。
-// 这两个数必须分清 —— 组件的"每段长度前缀"是从这个函数算的，
-// 要是拿内存大小去算，声明的长度比实际写出的多 4，
-// 读侧就会以为下个组件从那里开始，于是全体错位。
-static usize scene_field_elem_wire_size(ecs_field_kind_t kind)
-{
-    return (kind == ECS_FIELD_VEC3) ? 3u * sizeof(f32) : ecs_field_kind_size(kind);
-}
-
-static usize scene_field_wire_size(const ecs_field_desc_t *f)
-{
-    if (f->kind == ECS_FIELD_STRING) {
-        return (usize)f->capacity;
-    }
-    if (f->kind == ECS_FIELD_MESH_REF || f->kind == ECS_FIELD_MATERIAL_REF ||
-        f->kind == ECS_FIELD_ATLAS_REF) {
-        return (usize)SCENE_RESOURCE_NAME_MAX;
-    }
-    const usize elem = scene_field_elem_wire_size(f->kind);
-    const usize count = (f->count > 0u) ? (usize)f->count : 1u;
-    return elem * count;
-}
-
-static usize scene_desc_wire_size(const ecs_component_desc_t *desc)
-{
-    usize total = 0u;
-    for (u32 i = 0; i < desc->field_count; ++i) {
-        total += scene_field_wire_size(&desc->fields[i]);
-    }
-    return total;
 }
 
 // ============================================================ 名字与引用翻译
@@ -283,24 +253,38 @@ static bool bin_read_field(bio_reader_t *r, ecs_field_kind_t kind, void *p, scen
     return false;
 }
 
+// 按字段表写出**一个字段**（数组与定长字符串一起算）。
+// 这是"内存里的值 → 存档字节"的唯一一份实现 —— JSON 导入那边不重复实现它：
+// 省略字段的默认值由 scene_json.c 按**默认记录**逐字节抄过去，
+// 而默认记录是 construct / scene_env_default() / material_default() 的结果，
+// 所以两边的默认值不可能分叉。
+static bool bin_write_field_value(bio_writer_t *w, const ecs_field_desc_t *f, const u8 *base,
+                                  scene_io_ctx_t *ctx)
+{
+    if (f->kind == ECS_FIELD_STRING) {
+        // 定长字符串可以成组（材质槽位就是 8 个名字）。这里整块写出去：
+        // 元素在内存里本来就是紧挨着的 char[N]，所以"每元素 capacity 字节"
+        // 与"一整块 capacity*count"是同一件事，但要按 capacity*count 算才对。
+        const usize bytes = (usize)f->capacity * ((f->count > 0u) ? (usize)f->count : 1u);
+        return bio_write_bytes(w, base, bytes);
+    }
+    const usize count = (f->count > 0u) ? (usize)f->count : 1u;
+    const usize stride = ecs_field_kind_size(f->kind);
+    for (usize e = 0; e < count; ++e) {
+        if (!bin_write_field(w, f->kind, base + e * stride, ctx)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool bin_write_fields(bio_writer_t *w, const ecs_component_desc_t *desc, const void *comp,
                              scene_io_ctx_t *ctx)
 {
     for (u32 i = 0; i < desc->field_count; ++i) {
         const ecs_field_desc_t *f = &desc->fields[i];
-        const u8 *base = (const u8 *)comp + f->offset;
-        if (f->kind == ECS_FIELD_STRING) {
-            if (!bio_write_bytes(w, base, f->capacity)) {
-                return false;
-            }
-            continue;
-        }
-        const usize count = (f->count > 0u) ? (usize)f->count : 1u;
-        const usize stride = ecs_field_kind_size(f->kind);
-        for (usize e = 0; e < count; ++e) {
-            if (!bin_write_field(w, f->kind, base + e * stride, ctx)) {
-                return false;
-            }
+        if (!bin_write_field_value(w, f, (const u8 *)comp + f->offset, ctx)) {
+            return false;
         }
     }
     return true;
@@ -313,10 +297,17 @@ static bool bin_read_fields(bio_reader_t *r, const ecs_component_desc_t *desc, v
         const ecs_field_desc_t *f = &desc->fields[i];
         u8 *base = (u8 *)comp + f->offset;
         if (f->kind == ECS_FIELD_STRING) {
-            if (!bio_read_bytes(r, base, f->capacity)) {
-                return false;
+            // 与 bin_write_fields 对称：定长字符串可能成组（材质槽位 8 个名字）。
+            // 每个元素各自补一个结尾 NUL —— 坏文件里可能整段都没有 NUL，
+            // 而只补最后一格会让前面几格变成没有结尾的字符串。
+            const usize count = (f->count > 0u) ? (usize)f->count : 1u;
+            for (usize e = 0; e < count; ++e) {
+                u8 *element = base + e * (usize)f->capacity;
+                if (!bio_read_bytes(r, element, f->capacity)) {
+                    return false;
+                }
+                element[f->capacity - 1u] = '\0';
             }
-            base[f->capacity - 1u] = '\0'; // 定长字段兜一个结尾，坏文件里可能没有
             continue;
         }
         const usize count = (f->count > 0u) ? (usize)f->count : 1u;
@@ -345,112 +336,14 @@ static bool bin_write_record(bio_writer_t *w, const ecs_component_desc_t *desc, 
         return false;
     }
     const usize emitted = bio_writer_used(w) - before;
-    const usize want = scene_desc_wire_size(desc);
-    if (emitted != want) {
-        LOG_ERROR("%s 的长度不符：字段表算出 %llu 字节，实际写出 %llu 字节", desc->name,
-                  (unsigned long long)want, (unsigned long long)emitted);
-        return false;
-    }
-    return true;
+    return scene_io_check_record_bytes(desc, scene_io_desc_wire_size(desc), emitted);
 }
 
 // ============================================================ 三张描述表
 //
-// 环境、资源条目、材质都不是组件，但形状一样，所以共用上面那套编解码。
-
-#define IO_FIELD(name_str, type, field, kind_val)                                                  \
-    {                                                                                              \
-        name_str, (u16)ENGINE_OFFSETOF(type, field), kind_val, 1u, 0u, 0u                          \
-    }
-#define IO_FIELD_STR(name_str, type, field)                                                        \
-    {                                                                                              \
-        name_str, (u16)ENGINE_OFFSETOF(type, field), ECS_FIELD_STRING, 0u,                          \
-            (u16)sizeof(((type *)0)->field), 0u                                                    \
-    }
-
-static const ecs_field_desc_t k_env_fields[] = {
-    IO_FIELD("clear_color", scene_env_t, clear_color, ECS_FIELD_VEC4),
-    IO_FIELD("clear_color_enabled", scene_env_t, clear_color_enabled, ECS_FIELD_BOOL),
-    IO_FIELD("clear_depth_enabled", scene_env_t, clear_depth_enabled, ECS_FIELD_BOOL),
-    IO_FIELD("ambient_color", scene_env_t, ambient_color, ECS_FIELD_VEC3),
-    IO_FIELD("ambient_intensity", scene_env_t, ambient_intensity, ECS_FIELD_F32),
-    IO_FIELD("fog_enabled", scene_env_t, fog_enabled, ECS_FIELD_BOOL),
-    IO_FIELD("fog_color", scene_env_t, fog_color, ECS_FIELD_VEC3),
-    IO_FIELD("fog_start", scene_env_t, fog_start, ECS_FIELD_F32),
-    IO_FIELD("fog_end", scene_env_t, fog_end, ECS_FIELD_F32),
-    IO_FIELD("fog_density", scene_env_t, fog_density, ECS_FIELD_F32),
-    IO_FIELD("skybox_enabled", scene_env_t, skybox_enabled, ECS_FIELD_BOOL),
-    IO_FIELD("sky_horizon", scene_env_t, sky_horizon, ECS_FIELD_VEC3),
-    IO_FIELD("sky_zenith", scene_env_t, sky_zenith, ECS_FIELD_VEC3),
-    IO_FIELD("sky_ground", scene_env_t, sky_ground, ECS_FIELD_VEC3),
-    IO_FIELD("tonemap_mode", scene_env_t, tonemap_mode, ECS_FIELD_U32),
-    IO_FIELD("exposure", scene_env_t, exposure, ECS_FIELD_F32),
-    IO_FIELD("msaa_samples", scene_env_t, msaa_samples, ECS_FIELD_U32),
-    IO_FIELD("shadows_enabled", scene_env_t, shadows_enabled, ECS_FIELD_BOOL),
-    IO_FIELD("shadow_strength", scene_env_t, shadow_strength, ECS_FIELD_F32),
-    IO_FIELD("shadow_map_size", scene_env_t, shadow_map_size, ECS_FIELD_U32),
-    IO_FIELD("culling_enabled", scene_env_t, culling_enabled, ECS_FIELD_BOOL),
-    IO_FIELD("use_scene_target", scene_env_t, use_scene_target, ECS_FIELD_BOOL),
-};
-
-static const ecs_component_desc_t k_env_desc = {
-    .name = "Env",
-    .size = sizeof(scene_env_t),
-    .align = 16u,
-    .fields = k_env_fields,
-    .field_count = (u32)(sizeof(k_env_fields) / sizeof(k_env_fields[0])),
-};
-
-typedef struct scene_io_resource_t {
-    char name[SCENE_RESOURCE_NAME_MAX];
-    char path[SCENE_RESOURCE_NAME_MAX * 2u]; // 空 = 由应用提供的程序化几何
-} scene_io_resource_t;
-
-static const ecs_field_desc_t k_resource_fields[] = {
-    IO_FIELD_STR("name", scene_io_resource_t, name),
-    IO_FIELD_STR("path", scene_io_resource_t, path),
-};
-
-static const ecs_component_desc_t k_resource_desc = {
-    .name = "Resource",
-    .size = sizeof(scene_io_resource_t),
-    .align = 16u,
-    .fields = k_resource_fields,
-    .field_count = (u32)(sizeof(k_resource_fields) / sizeof(k_resource_fields[0])),
-};
-
-typedef struct scene_io_material_t {
-    char name[SCENE_RESOURCE_NAME_MAX];
-    char pipeline[SCENE_RESOURCE_NAME_MAX];
-    // 每个槽位一个图集名（空串 = 该槽位没挂）。
-    //
-    // 8 槽 × 64 字节 = 512 字节/材质，材质表上限 64 → 最坏多占 32KB。
-    // 这里选"定长、整块读写"而不是"槽数 + 变长"，是为了让这一条记录仍然
-    // 能被那**一套**定长遍历处理（变长就要给格式加第二套读法，
-    // 而"跳过不认识的组件"依赖的正是尺寸可纯从表算出）。
-    // 真要瘦身，等 M11 有实测数据再换，不在这里先设计后需求。
-    char atlases[RENDER_MAX_TEXTURE_SLOTS][SCENE_RESOURCE_NAME_MAX];
-    vec4_t tint;
-    vec4_t pbr;
-    vec4_t emissive;
-} scene_io_material_t;
-
-static const ecs_field_desc_t k_material_fields[] = {
-    IO_FIELD_STR("name", scene_io_material_t, name),
-    IO_FIELD_STR("pipeline", scene_io_material_t, pipeline),
-    IO_FIELD_STR("atlases", scene_io_material_t, atlases),
-    IO_FIELD("tint", scene_io_material_t, tint, ECS_FIELD_VEC4),
-    IO_FIELD("pbr", scene_io_material_t, pbr, ECS_FIELD_VEC4),
-    IO_FIELD("emissive", scene_io_material_t, emissive, ECS_FIELD_VEC4),
-};
-
-static const ecs_component_desc_t k_material_desc = {
-    .name = "Material",
-    .size = sizeof(scene_io_material_t),
-    .align = 16u,
-    .fields = k_material_fields,
-    .field_count = (u32)(sizeof(k_material_fields) / sizeof(k_material_fields[0])),
-};
+// 环境、资源条目、材质的字段表与记录结构都在 scene_io_internal.h 里 ——
+// JSON 形式（scene_json.c）要用同一份。抄两份表就等于让两种编码各自理解
+// "哪个字段是哪个"，而那正是本阶段所有格式 bug 的形状。
 
 // ============================================================ 注册表与类型表
 
@@ -470,12 +363,14 @@ u32 scene_registry_hash(scene_t *scene)
     return hash;
 }
 
-static u32 scene_serializable_types(const scene_io_ctx_t *ctx, ecs_component_id *out, u32 max)
+// 这份注册表里哪些类型要进存档。声明在 scene_io_internal.h：
+// JSON 导入必须按**完全相同的顺序**摆它的类型表，否则两种编码的字节无从相同。
+u32 scene_serializable_types(const ecs_world_t *world, ecs_component_id *out, u32 max)
 {
-    const u32 types = ecs_component_type_count(ctx->world);
+    const u32 types = ecs_component_type_count(world);
     u32 n = 0u;
     for (u32 id = 0u; id < types; ++id) {
-        const ecs_component_desc_t *d = ecs_component_desc(ctx->world, id);
+        const ecs_component_desc_t *d = ecs_component_desc(world, id);
         if (d == NULL || d->skip_serialize) {
             continue;
         }
@@ -500,7 +395,7 @@ static scene_io_resource_t scene_io_resource_record(const char *name, const char
 static scene_io_material_t scene_io_material_record(scene_t *scene, u32 id)
 {
     scene_io_material_t m;
-    memset(&m, 0, sizeof(m));
+    scene_io_material_record_default(&m); // 三个 vec4 的默认值只有一份定义（见 internal 头）
     snprintf(m.name, sizeof(m.name), "%s", scene_material_name(scene, id));
     snprintf(m.pipeline, sizeof(m.pipeline), "%s",
              (scene_material_pipeline(scene, id) != NULL)
@@ -522,8 +417,9 @@ static scene_io_material_t scene_io_material_record(scene_t *scene, u32 id)
     return m;
 }
 
-// 一次写出的实体上限。超过就是要换分块存档 —— 报错而不是静默截断。
-#define SCENE_IO_MAX_ENTITIES_PER_FILE 65536u
+// 一次写出的实体上限在 scene_io_internal.h（SCENE_IO_MAX_ENTITIES_PER_FILE）：
+// 超过就是要换分块存档 —— 报错而不是静默截断。JSON 形式共用同一个数，
+// 否则会出现"这个 JSON 存得出来但转不成存档"的第二种失败模式。
 
 bool scene_archive_peek(const void *bytes, usize size, u32 *out_entities, u32 *out_kind)
 {
@@ -734,8 +630,13 @@ static u32 collect_subtree(ecs_world_t *world, const entity_t *all, u32 all_coun
 // 一份存档 = 环境块 + 资源表 + 一段实体。
 // "一段实体"可以是整个世界（scope == NULL），也可以是场景里的一个子树（预制体）——
 // 同一套代码，因为两者需要的翻译只有一处不同：dense id 从哪来。
-static bool write_archive(scene_t *scene, const entity_t *scope, u32 scope_count, arena_t *arena,
-                          void **out_bytes, usize *out_size, scene_io_stats_t *out_stats)
+//
+// 这个函数是**两种编码共用的写出内核**（声明在 scene_io_internal.h）。
+// JSON 形式不自己决定"哪些实体、什么顺序、带哪些资源"，而是先转码这份
+// 二进制再展开成文本 —— 于是那条策略全工程只有一份。
+bool scene_io_write_archive(scene_t *scene, const entity_t *scope, u32 scope_count,
+                            arena_t *arena, void **out_bytes, usize *out_size,
+                            scene_io_stats_t *out_stats)
 {
     ASSERT(scene != NULL && arena != NULL);
     if (out_bytes != NULL) {
@@ -756,7 +657,7 @@ static bool write_archive(scene_t *scene, const entity_t *scope, u32 scope_count
     ctx.scope_count = scope_count;
 
     ecs_component_id types[ECS_MAX_COMPONENTS];
-    const u32 type_count = scene_serializable_types(&ctx, types, ECS_MAX_COMPONENTS);
+    const u32 type_count = scene_serializable_types(ctx.world, types, ECS_MAX_COMPONENTS);
 
     // 整场景写**整张**资源表；预制体只写它引用到的那几条。
     // 少了这个过滤，"实例化一个炮塔"会把源场景的 200 个网格名一并灌进目标场景，
@@ -833,7 +734,7 @@ static bool write_archive(scene_t *scene, const entity_t *scope, u32 scope_count
             if (comp == NULL) {
                 continue;
             }
-            const usize payload = scene_desc_wire_size(ecs_component_desc(ctx.world, types[t]));
+            const usize payload = scene_io_desc_wire_size(ecs_component_desc(ctx.world, types[t]));
             record += each_comp + payload;
             comps_counted++;
         }
@@ -841,14 +742,14 @@ static bool write_archive(scene_t *scene, const entity_t *scope, u32 scope_count
     }
 
     usize total = SCENE_FILE_HEADER_SIZE;
-    total += scene_desc_wire_size(&k_env_desc);
+    total += scene_io_desc_wire_size(&k_env_desc);
     total += 4u + (usize)type_count * (SCENE_RESOURCE_NAME_MAX + 4u);
     // 资源三段**没有**自己的计数前缀（长度就是头部的三个计数），所以这里不能
     // 顺手各加 4：加了就是"算出来的总长比写出去的多"，而这类自我不一致
     // 只有末尾那条长度自检会抓到 —— 它抓到了，这就是它存在的理由。
-    total += (usize)mesh_count * scene_desc_wire_size(&k_resource_desc);
-    total += (usize)atlas_count * scene_desc_wire_size(&k_resource_desc);
-    total += (usize)material_count * scene_desc_wire_size(&k_material_desc);
+    total += (usize)mesh_count * scene_io_desc_wire_size(&k_resource_desc);
+    total += (usize)atlas_count * scene_io_desc_wire_size(&k_resource_desc);
+    total += (usize)material_count * scene_io_desc_wire_size(&k_material_desc);
     total += 4u + (usize)ent_count * 12u; // 实体索引段
     total += 4u + entity_bytes;           // 实体数据段
 
@@ -964,7 +865,7 @@ static bool write_archive(scene_t *scene, const entity_t *scope, u32 scope_count
                 continue;
             }
             const ecs_component_desc_t *d = ecs_component_desc(ctx.world, types[t]);
-            const usize payload = scene_desc_wire_size(d);
+            const usize payload = scene_io_desc_wire_size(d);
             if (!bio_write_u32(&w, t) || !bio_write_u32(&w, (u32)payload)) {
                 return false;
             }
@@ -989,7 +890,7 @@ static bool write_archive(scene_t *scene, const entity_t *scope, u32 scope_count
                   (unsigned long long)bio_writer_used(&w));
         LOG_ERROR("  分段：env %llu，类型表 %u 条，网格 %u，图集 %u，材质 %u，实体 %u 个 / "
                   "数据 %llu 字节（量出 %u 个组件，写出 %u 个）",
-                  (unsigned long long)scene_desc_wire_size(&k_env_desc), (unsigned)type_count,
+                  (unsigned long long)scene_io_desc_wire_size(&k_env_desc), (unsigned)type_count,
                   (unsigned)mesh_count, (unsigned)atlas_count, (unsigned)material_count,
                   (unsigned)ent_count, (unsigned long long)entity_bytes,
                   (unsigned)comps_counted, (unsigned)stats.components_written);
@@ -1010,7 +911,7 @@ static bool write_archive(scene_t *scene, const entity_t *scope, u32 scope_count
 bool scene_write_binary(scene_t *scene, arena_t *arena, void **out_bytes, usize *out_size,
                         scene_io_stats_t *out_stats)
 {
-    return write_archive(scene, NULL, 0u, arena, out_bytes, out_size, out_stats);
+    return scene_io_write_archive(scene, NULL, 0u, arena, out_bytes, out_size, out_stats);
 }
 
 bool scene_write_prefab(scene_t *scene, entity_t root, arena_t *arena, void **out_bytes,
@@ -1054,7 +955,42 @@ bool scene_write_prefab(scene_t *scene, entity_t root, arena_t *arena, void **ou
     if (sub_count == 0u) {
         return false; // collect_subtree 已经说明为什么是 0 了
     }
-    return write_archive(scene, sub, sub_count, arena, out_bytes, out_size, out_stats);
+    return scene_io_write_archive(scene, sub, sub_count, arena, out_bytes, out_size, out_stats);
+}
+
+// 子树大小（含 root 自己）。0 = root 无效或没有 scratch arena。
+//
+// 复用 collect_subtree 而不是"上溯每个实体的父链"数一遍：
+// 后者是第二套"什么算这个子树"的答案，而这两套答案迟早会分叉
+// （例如其中一套忘了处理 root 自己、或者被父子环绕进去）。
+u32 scene_subtree_size(scene_t *scene, entity_t root)
+{
+    ASSERT(scene != NULL);
+    if (!entity_is_valid(root)) {
+        return 0u;
+    }
+    ecs_world_t *world = scene_world(scene);
+    arena_t *scratch = scene_scratch_arena(scene);
+    if (scratch == NULL) {
+        LOG_ERROR("场景缺少 scratch arena，无法数子树");
+        return 0u;
+    }
+    const arena_mark_t mark = arena_mark(scratch);
+
+    ecs_world_stats_t wstats;
+    ecs_world_get_stats(world, &wstats);
+    const u32 want = ecs_collect_entities(world, NULL, 0u);
+    entity_t *all = ARENA_NEW_ARRAY(scratch, entity_t, want + 1u);
+    entity_t *sub = ARENA_NEW_ARRAY(scratch, entity_t, want + 1u);
+    if (all == NULL || sub == NULL) {
+        arena_rewind(scratch, mark);
+        return 0u;
+    }
+    const u32 all_count = ecs_collect_entities(world, all, want);
+    const u32 size = collect_subtree(world, all, all_count, wstats.entity_capacity, root, sub, want,
+                                     scratch);
+    arena_rewind(scratch, mark);
+    return size;
 }
 
 // ============================================================ 读入
@@ -1132,9 +1068,11 @@ static bool bin_read_material_section(bio_reader_t *r, scene_t *scene, u32 count
     return true;
 }
 
-// 存档的读实现。公开的两个入口只在这上面套了一层 scratch arena 的 mark/rewind。
-static bool read_archive(scene_t *scene, const void *bytes, usize size,
-                         scene_io_stats_t *out_stats, entity_t *out_root)
+// 存档的读实现。公开的 scene_*_binary 入口只在这上面套了一层 scratch arena 的
+// mark/rewind，JSON 的读入口则把转码出来的字节交给它 ——
+// **校验只有这一处**，两种编码共用同一个守门人。
+bool scene_io_read_archive(scene_t *scene, const void *bytes, usize size,
+                           scene_io_stats_t *out_stats, entity_t *out_root)
 {
     ASSERT(scene != NULL);
 
@@ -1370,9 +1308,9 @@ static bool read_archive(scene_t *scene, const void *bytes, usize size,
             // 这时"按长度跳过"的算术也不可信，继续读只会把后面的实体全读歪，
             // 所以这里必须整份拒绝，而不是宽容地往下走。
             const ecs_component_desc_t *d = ecs_component_desc(world, id);
-            if (payload != (u32)scene_desc_wire_size(d)) {
+            if (payload != (u32)scene_io_desc_wire_size(d)) {
                 LOG_ERROR("组件 %s 的存档长度 %u 与字段表算出的 %llu 不符", d->name,
-                          (unsigned)payload, (unsigned long long)scene_desc_wire_size(d));
+                          (unsigned)payload, (unsigned long long)scene_io_desc_wire_size(d));
                 return false;
             }
             void *comp = ecs_add(world, self, id, NULL);
@@ -1427,7 +1365,7 @@ bool scene_read_binary_root(scene_t *scene, const void *bytes, usize size,
         return false;
     }
     const arena_mark_t mark = arena_mark(scratch);
-    const bool ok = read_archive(scene, bytes, size, out_stats, out_root);
+    const bool ok = scene_io_read_archive(scene, bytes, size, out_stats, out_root);
     arena_rewind(scratch, mark);
     return ok;
 }
@@ -1439,10 +1377,10 @@ bool scene_read_binary(scene_t *scene, const void *bytes, usize size, scene_io_s
 
 // ============================================================ 文件读写
 
-// 把一份已经生成好的存档落盘。单独一个函数是因为存场景和存预制体
-// 除了"字节从哪来"以外完全一样，而错误处理（短写、fclose 失败）抄两遍
-// 迟早会有一遍是错的。
-static bool scene_write_file(const void *bytes, usize size, const char *path, const char *what)
+// 把一份已经生成好的存档落盘。单独一个函数（并且两种编码都走它）是因为
+// 存场景、存预制体、存 JSON 除了"字节从哪来"以外完全一样，
+// 而错误处理（短写、fclose 失败）抄三遍迟早有一遍是错的。
+bool scene_io_write_file(const void *bytes, usize size, const char *path, const char *what)
 {
     FILE *file = fopen(path, "wb");
     if (file == NULL) {
@@ -1456,6 +1394,52 @@ static bool scene_write_file(const void *bytes, usize size, const char *path, co
         return false;
     }
     LOG_INFO("%s已存盘: %s（%llu 字节）", what, path, (unsigned long long)size);
+    return true;
+}
+
+// 整个文件读进调用方给的 arena。缓冲区不额外加 NUL：两种 reader 都是按长度读的
+// （JSON 解析器也是 json_parse(arena, text, length, ...)），
+// 加一个"看起来像 C 字符串"的结尾只会诱使下一个调用方去 strlen 它。
+bool scene_io_read_file(const char *path, arena_t *arena, void **out_buf, usize *out_size)
+{
+    if (path == NULL || arena == NULL || out_buf == NULL || out_size == NULL) {
+        return false;
+    }
+    *out_buf = NULL;
+    *out_size = 0u;
+
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        LOG_ERROR("无法打开场景存档: %s", path);
+        return false;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        LOG_ERROR("场景存档无法定位到末尾: %s", path);
+        fclose(file);
+        return false;
+    }
+    const long length = ftell(file);
+    if (length <= 0) {
+        LOG_ERROR("场景存档为空: %s", path);
+        fclose(file);
+        return false;
+    }
+    rewind(file);
+
+    void *buffer = arena_alloc(arena, (usize)length);
+    if (buffer == NULL) {
+        LOG_ERROR("场景存档超出 scratch arena 容量: %s（%ld 字节）", path, length);
+        fclose(file);
+        return false;
+    }
+    if (fread(buffer, 1u, (usize)length, file) != (usize)length) {
+        LOG_ERROR("场景存档读取不完整: %s", path);
+        fclose(file);
+        return false;
+    }
+    fclose(file);
+    *out_buf = buffer;
+    *out_size = (usize)length;
     return true;
 }
 
@@ -1476,7 +1460,7 @@ bool scene_save_binary(scene_t *scene, const char *path, scene_io_stats_t *out_s
     void *bytes = NULL;
     usize size = 0u;
     const bool ok = scene_write_binary(scene, scratch, &bytes, &size, out_stats) &&
-                    scene_write_file(bytes, size, path, "场景");
+                    scene_io_write_file(bytes, size, path, "场景");
     arena_rewind(scratch, mark);
     return ok;
 }
@@ -1495,58 +1479,25 @@ bool scene_save_prefab(scene_t *scene, entity_t root, const char *path, scene_io
     void *bytes = NULL;
     usize size = 0u;
     const bool ok = scene_write_prefab(scene, root, scratch, &bytes, &size, out_stats) &&
-                    scene_write_file(bytes, size, path, "预制体");
+                    scene_io_write_file(bytes, size, path, "预制体");
     arena_rewind(scratch, mark);
     return ok;
 }
 
 bool scene_load_binary(scene_t *scene, const char *path, scene_io_stats_t *out_stats)
 {
-    if (scene == NULL || path == NULL) {
-        return false;
-    }
-    FILE *file = fopen(path, "rb");
-    if (file == NULL) {
-        LOG_ERROR("无法打开场景存档: %s", path);
-        return false;
-    }
-    if (fseek(file, 0, SEEK_END) != 0) {
-        LOG_ERROR("场景存档无法定位到末尾: %s", path);
-        fclose(file);
-        return false;
-    }
-    const long length = ftell(file);
-    if (length <= 0) {
-        LOG_ERROR("场景存档为空: %s", path);
-        fclose(file);
-        return false;
-    }
-    rewind(file);
-
     arena_t *arena = scene_scratch_arena(scene);
     if (arena == NULL) {
         LOG_ERROR("场景缺少 scratch arena，无法读档");
-        fclose(file);
         return false;
     }
-    // 临时文件缓冲走 scratch，且由 scene_read_binary_root 自己的 mark 管不到它 ——
+    // 临时文件缓冲走 scratch，且由 scene_io_read_archive 的 mark 管不到它 ——
     // 所以这里也要 mark/rewind，否则"加载 100 个预制体文件"就是 100 份文件大小。
     const arena_mark_t mark = arena_mark(arena);
-    void *buffer = arena_alloc(arena, (usize)length);
-    if (buffer == NULL) {
-        LOG_ERROR("场景存档超出 scratch arena 容量: %s（%ld 字节）", path, length);
-        fclose(file);
-        return false;
-    }
-    if (fread(buffer, 1u, (usize)length, file) != (usize)length) {
-        LOG_ERROR("场景存档读取不完整: %s", path);
-        fclose(file);
-        arena_rewind(arena, mark);
-        return false;
-    }
-    fclose(file);
-
-    const bool ok = scene_read_binary_root(scene, buffer, (usize)length, out_stats, NULL);
+    void *buffer = NULL;
+    usize size = 0u;
+    const bool ok = scene_io_read_file(path, arena, &buffer, &size) &&
+                    scene_io_read_archive(scene, buffer, size, out_stats, NULL);
     arena_rewind(arena, mark);
     return ok;
 }

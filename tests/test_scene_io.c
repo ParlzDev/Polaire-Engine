@@ -209,6 +209,53 @@ static bool io_write(scene_io_fixture_t *fx, arena_t *arena, void **out_bytes, u
     return scene_write_binary(fx->scene, arena, out_bytes, out_size, out_stats);
 }
 
+// 按 Name 组件找实体（预制体那几条测试要用子树的根）。
+static entity_t io_find_by_name(scene_io_fixture_t *fx, const char *name)
+{
+    ecs_world_t *world = scene_world(fx->scene);
+    entity_t list[IO_TEST_ENTS];
+    const u32 count = ecs_collect_entities(world, list, IO_TEST_ENTS);
+    for (u32 i = 0u; i < count; ++i) {
+        const scene_name_t *n = (const scene_name_t *)ecs_peek(world, list[i], fx->ids.name);
+        if (n != NULL && strcmp(n->text, name) == 0) {
+            return list[i];
+        }
+    }
+    return ENTITY_NONE;
+}
+
+// 把一份文件原样复制到另一个名字下。用来造"后缀与内容互相写反"的文件：
+// 自动判格式如果去看后缀，这两份就会读错，而读错的症状是看不懂的解析错误。
+static bool io_copy_file(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb");
+    if (in == NULL) {
+        return false;
+    }
+    FILE *out = fopen(to, "wb");
+    if (out == NULL) {
+        fclose(in);
+        return false;
+    }
+    bool ok = true;
+    char buf[4096];
+    size_t got = 0u;
+    while ((got = fread(buf, 1u, sizeof(buf), in)) > 0u) {
+        if (fwrite(buf, 1u, got, out) != got) {
+            ok = false;
+            break;
+        }
+    }
+    if (ferror(in)) {
+        ok = false;
+    }
+    fclose(in);
+    if (fclose(out) != 0) {
+        ok = false;
+    }
+    return ok;
+}
+
 // ---------------------------------------------------------------- 按内容定位
 
 #define IO_NOT_FOUND ((usize)0xFFFFFFFFFFFFFFFFull)
@@ -944,6 +991,619 @@ static void scene_io_file_roundtrip(void)
 }
 
 // =============================================================================
+//                       JSON 形式（转码）
+//
+//  判据分三层，缺一不可：
+//   1. **纯转码无损**：二进制 → JSON → 二进制，字节必须完全相同。
+//      这条最强，因为它不经过"读进场景再写出来"，所以 dense 压实之类的
+//      正常规范化不会掩盖真正的丢内容。
+//   2. **跨格式等价**：场景 A 的二进制 与 (A→JSON→场景 B) 的二进制，字节相同。
+//      这条证明两种编码描述的**是同一份数据**，而不只是都能读回来。
+//   3. **文本自稳定**：JSON → 场景 → JSON，文本相同 —— 人手改完存盘再改再存,
+//      不能每过一轮就漂几个字节。
+//
+//  另外几条是 JSON 独有的风险，二进制那边覆盖不到：
+//   * 省略字段必须取**默认记录**的值（不是 0、不是 0xFFFFFFFF）；
+//   * 浮点经过十进制文本之后必须逐位回来；
+//   * 文档写坏了要整份拒绝，版本漂移要按类型跳过并计数。
+// =============================================================================
+
+// 两段字节必须相同；不等时指出首个差异偏移。
+// 只说"不相等"等于把二分查找的工作交给下一个人，而那个工作要几十分钟。
+static void io_expect_same_bytes(const void *a, usize a_size, const void *b, usize b_size,
+                                 const char *what)
+{
+    if (a_size != b_size) {
+        TF_CHECK(false, "%s：长度不符 %llu 对 %llu", what, (unsigned long long)a_size,
+                 (unsigned long long)b_size);
+        return;
+    }
+    usize diff = 0u;
+    while (diff < a_size && ((const u8 *)a)[diff] == ((const u8 *)b)[diff]) {
+        diff++;
+    }
+    if (diff != a_size) {
+        TF_CHECK(false, "%s：首个差异在偏移 %llu（0x%llX），前 %llu 字节相同", what,
+                 (unsigned long long)diff, (unsigned long long)diff, (unsigned long long)diff);
+    }
+}
+
+static usize io_arena_used(const scene_io_fixture_t *fx)
+{
+    return arena_bytes_used(scene_scratch_arena(fx->scene));
+}
+
+// 1. 纯转码无损：二进制 ↔ JSON 文本，不经过场景
+static void scene_json_transcode_is_lossless(void)
+{
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_xcode_a");
+    io_build_scene(&a);
+
+    allocator_tracking_t tracker;
+    allocator_tracking_init(&tracker, allocator_heap());
+    arena_t arena;
+    EXPECT_TRUE(arena_init(&arena, &tracker.base, 1024u * 1024u, "js_arena"));
+
+    void *binary = NULL;
+    usize binary_size = 0u;
+    EXPECT_TRUE(io_write(&a, &arena, &binary, &binary_size, NULL));
+
+    void *text = NULL;
+    usize text_length = 0u;
+    EXPECT_TRUE(scene_write_json(a.scene, &arena, &text, &text_length, NULL));
+    EXPECT_GT_U64(text_length, 200u); // 太短说明只写出去了一小段
+    EXPECT_EQ_U64(((const char *)text)[text_length], 0u); // 结尾那个 NUL
+
+    // 文本编回字节：必须和原来那份**一模一样**
+    scene_io_fixture_t b;
+    io_fixture_begin(&b, "js_xcode_b");
+    void *back = NULL;
+    usize back_size = 0u;
+    EXPECT_TRUE(scene_binary_from_json(b.scene, (const char *)text, text_length, &arena, &back,
+                                       &back_size));
+    io_expect_same_bytes(binary, binary_size, back, back_size, "二进制→JSON→二进制");
+
+    // 反方向也走一遍：JSON → 二进制 → JSON，文本必须逐字节相同
+    void *again = NULL;
+    usize again_length = 0u;
+    EXPECT_TRUE(scene_json_from_binary(b.scene, back, back_size, &arena, &again, &again_length));
+    EXPECT_EQ_U64(text_length, again_length);
+    io_expect_same_bytes(text, text_length, again, again_length, "JSON→二进制→JSON");
+
+    io_fixture_end(&b);
+    io_fixture_end(&a);
+    arena_destroy(&arena);
+    EXPECT_FALSE(allocator_tracking_has_leak(&tracker));
+}
+
+// 2. 跨格式等价：A 的二进制 == (A→JSON→B) 的二进制
+static void scene_json_cross_format_equivalent(void)
+{
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_cross_a");
+    io_build_scene(&a);
+
+    allocator_tracking_t tracker;
+    allocator_tracking_init(&tracker, allocator_heap());
+    arena_t arena;
+    EXPECT_TRUE(arena_init(&arena, &tracker.base, 1024u * 1024u, "js_cross_arena"));
+
+    void *binary = NULL;
+    usize binary_size = 0u;
+    EXPECT_TRUE(io_write(&a, &arena, &binary, &binary_size, NULL));
+
+    void *text = NULL;
+    usize text_length = 0u;
+    EXPECT_TRUE(scene_write_json(a.scene, &arena, &text, &text_length, NULL));
+
+    scene_io_fixture_t b;
+    io_fixture_begin(&b, "js_cross_b");
+    scene_io_stats_t stats;
+    EXPECT_TRUE(scene_read_json(b.scene, (const char *)text, text_length, &stats));
+    EXPECT_EQ_U64(stats.entities_loaded, 4u);
+    EXPECT_EQ_U64(stats.components_loaded, IO_BUILD_COMPONENTS);
+    EXPECT_EQ_U64(stats.resources_loaded, 5u);
+    EXPECT_EQ_U64(stats.unknown_component_types, 0u);
+    EXPECT_EQ_U64(stats.schema_mismatches, 0u);
+    EXPECT_EQ_U64(stats.dangling_refs, 0u);
+
+    void *second = NULL;
+    usize second_size = 0u;
+    EXPECT_TRUE(io_write(&b, &arena, &second, &second_size, NULL));
+    io_expect_same_bytes(binary, binary_size, second, second_size, "JSON 读进来再写成二进制");
+
+    io_fixture_end(&b);
+    io_fixture_end(&a);
+    arena_destroy(&arena);
+    EXPECT_FALSE(allocator_tracking_has_leak(&tracker));
+}
+
+// 3. 文本自稳定 + 临时内存不累积
+static void scene_json_text_is_stable(void)
+{
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_stable_a");
+    io_build_scene(&a);
+
+    allocator_tracking_t tracker;
+    allocator_tracking_init(&tracker, allocator_heap());
+    arena_t arena;
+    EXPECT_TRUE(arena_init(&arena, &tracker.base, 1024u * 1024u, "js_stable_arena"));
+
+    void *first = NULL;
+    usize first_length = 0u;
+    EXPECT_TRUE(scene_write_json(a.scene, &arena, &first, &first_length, NULL));
+
+    // 读进一个全新场景、再写成文本：三轮下来文本必须一个字节都不漂。
+    // 漂了就意味着"每存一次盘场景就变一点"，那是编辑器里最难查的一类问题。
+    for (u32 round = 0u; round < 3u; ++round) {
+        scene_io_fixture_t b;
+        io_fixture_begin(&b, "js_stable_b");
+        const usize scratch_before = io_arena_used(&b);
+        scene_io_stats_t stats;
+        EXPECT_TRUE(scene_read_json(b.scene, (const char *)first, first_length, &stats));
+        // 读档的三张临时表（dense 映射、父 dense、组件计数）用完必须整体丢掉：
+        // 前 99 次都不会失败，所以这种泄漏只能靠断言而不是靠运气。
+        EXPECT_EQ_U64(io_arena_used(&b), scratch_before);
+
+        void *next = NULL;
+        usize next_length = 0u;
+        EXPECT_TRUE(scene_write_json(b.scene, &arena, &next, &next_length, NULL));
+        EXPECT_EQ_U64(first_length, next_length);
+        if (first_length == next_length) {
+            io_expect_same_bytes(first, first_length, next, next_length, "再写出的 JSON 文本");
+        }
+        io_fixture_end(&b);
+    }
+
+    io_fixture_end(&a);
+    arena_destroy(&arena);
+    EXPECT_FALSE(allocator_tracking_has_leak(&tracker));
+}
+
+// 4. 文件形式 + 按内容挑格式
+static void scene_json_file_roundtrip(void)
+{
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_file_a");
+    io_build_scene(&a);
+
+    const char *bin_path = "scene_json_file_test.tmp.bin";
+    const char *json_path = "scene_json_file_test.tmp.json";
+    // 后缀与内容**互相写反**的四个名字：自动判别必须看内容而不是后缀
+    const char *liar_bin = "scene_json_liar_test.tmp.bin";  // 里面其实是 JSON
+    const char *liar_json = "scene_json_liar_test.tmp.json"; // 里面其实是二进制
+
+    scene_io_stats_t wstats;
+    EXPECT_TRUE(scene_save_binary(a.scene, bin_path, &wstats));
+    EXPECT_TRUE(scene_save_json(a.scene, json_path, &wstats));
+
+    // 先把两种内容抄到写反的名字下
+    EXPECT_TRUE(io_copy_file(bin_path, liar_json));
+    EXPECT_TRUE(io_copy_file(json_path, liar_bin));
+
+    scene_io_fixture_t b;
+    io_fixture_begin(&b, "js_file_b");
+    scene_io_stats_t stats;
+    EXPECT_TRUE(scene_load_auto(b.scene, bin_path, &stats));
+    EXPECT_EQ_U64(stats.entities_loaded, 4u);
+    io_fixture_end(&b);
+
+    io_fixture_begin(&b, "js_file_c");
+    EXPECT_TRUE(scene_load_auto(b.scene, json_path, &stats));
+    EXPECT_EQ_U64(stats.entities_loaded, 4u);
+    EXPECT_EQ_U64(stats.components_loaded, IO_BUILD_COMPONENTS);
+    io_fixture_end(&b);
+
+    io_fixture_begin(&b, "js_file_d");
+    EXPECT_TRUE(scene_load_auto(b.scene, liar_bin, &stats)); // 后缀骗不了内容探测
+    EXPECT_EQ_U64(stats.entities_loaded, 4u);
+    io_fixture_end(&b);
+
+    io_fixture_begin(&b, "js_file_e");
+    EXPECT_TRUE(scene_load_auto(b.scene, liar_json, &stats));
+    EXPECT_EQ_U64(stats.entities_loaded, 4u);
+    io_fixture_end(&b);
+
+    // 不存在的文件：失败而不是崩，两种入口都要拒
+    io_fixture_begin(&b, "js_file_f");
+    EXPECT_FALSE(scene_load_json(b.scene, "scene_json_no_such_file.json", &stats));
+    EXPECT_FALSE(scene_load_auto(b.scene, "scene_json_no_such_file.json", &stats));
+    EXPECT_FALSE(scene_save_json(b.scene, NULL, &stats));
+    io_fixture_end(&b);
+
+    remove(bin_path);
+    remove(json_path);
+    remove(liar_bin);
+    remove(liar_json);
+    io_fixture_end(&a);
+}
+
+static void scene_json_path_suffix_rules(void)
+{
+    EXPECT_TRUE(scene_path_is_json("a/b/c.scene.json"));
+    EXPECT_TRUE(scene_path_is_json("CAPITAL.JSON"));
+    EXPECT_TRUE(scene_path_is_json(".json"));
+    EXPECT_FALSE(scene_path_is_json("a.scene"));
+    EXPECT_FALSE(scene_path_is_json("json"));     // 太短，连点都没有
+    EXPECT_FALSE(scene_path_is_json("a.jsonx"));  // 后缀必须在最末尾
+    EXPECT_FALSE(scene_path_is_json(NULL));
+    EXPECT_FALSE(scene_path_is_json(""));
+}
+
+// 5. 手写的极简文档：省略的东西一律取默认值
+static void scene_json_hand_written_defaults(void)
+{
+    static const char *const k_doc =
+        "{"
+        "  \"kind\": \"scene\","
+        "  \"entities\": ["
+        "    { \"components\": [ { \"type\": \"Camera\", \"fields\": {} } ] },"
+        "    { \"parent\": 0, \"components\": ["
+        "        { \"type\": \"Name\", \"fields\": { \"text\": \"手写的\" } },"
+        "        { \"type\": \"Transform\", \"fields\": { \"position\": [1.5, -2.25, 30.5] } }"
+        "      ] },"
+        "    { \"components\": [ { \"type\": \"WorldTransform\", \"fields\": {} } ] }"
+        "  ]"
+        "}";
+
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_hand_a");
+    io_log_guard_t quiet;
+    io_quiet_logs(&quiet); // 派生组件那条 WARN 是预期内的，不该刷屏
+    scene_io_stats_t stats;
+    const bool ok = scene_read_json(a.scene, k_doc, strlen(k_doc), &stats);
+    io_restore_logs(&quiet);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ_U64(stats.entities_loaded, 3u);
+    // 派生组件（skip_serialize）按"不认识"计一次，而不是当成打字错误拒掉整份
+    EXPECT_EQ_U64(stats.unknown_component_types, 1u);
+    EXPECT_EQ_U64(stats.schema_mismatches, 0u);
+    // 没写资源表 → 空的；没写环境 → 全默认
+    EXPECT_EQ_U64(scene_mesh_count(a.scene), 0u);
+    EXPECT_EQ_U64(scene_material_count(a.scene), 0u);
+    const scene_env_t d = scene_env_default();
+    const scene_env_t *env = scene_environment(a.scene);
+    EXPECT_EQ_U64(env->msaa_samples, d.msaa_samples);
+    EXPECT_EQ_U64(env->shadow_map_size, d.shadow_map_size);
+    EXPECT_EQ_U64(env->tonemap_mode, d.tonemap_mode);
+    EXPECT_NEAR((double)env->fog_end, (double)d.fog_end, 1e-6);
+    EXPECT_NEAR((double)env->exposure, (double)d.exposure, 1e-6);
+
+    ecs_world_t *world = scene_world(a.scene);
+    const entity_t cam = ecs_entity_from_dense(world, 0u);
+    const entity_t kid = ecs_entity_from_dense(world, 1u);
+    const entity_t derived = ecs_entity_from_dense(world, 2u);
+    EXPECT_TRUE(entity_is_valid(cam));
+
+    // Camera 一个字段都没写 → 全部是 construct 的默认值
+    const scene_camera_t *c = (const scene_camera_t *)ecs_peek(world, cam, a.ids.camera);
+    EXPECT_NOT_NULL(c);
+    if (c != NULL) {
+        scene_camera_t probe;
+        memset(&probe, 0, sizeof(probe));
+        if (scene_camera_desc.construct != NULL) {
+            scene_camera_desc.construct(&probe); // 默认值的唯一来源，测试不自己抄一份
+        }
+        EXPECT_EQ_U64(c->projection, probe.projection);
+        EXPECT_NEAR((double)c->fov_y_degrees, (double)probe.fov_y_degrees, 1e-6);
+        EXPECT_NEAR((double)c->zfar, (double)probe.zfar, 1e-6);
+        EXPECT_TRUE(c->active == probe.active);
+    }
+    // Transform 写了 position，rotation/scale 必须仍然是默认值而不是零
+    const ecs_transform_t *t = (const ecs_transform_t *)ecs_peek(world, kid, a.ids.transform);
+    EXPECT_NOT_NULL(t);
+    if (t != NULL) {
+        EXPECT_NEAR((double)t->position.x, 1.5, 1e-6);
+        EXPECT_NEAR((double)t->position.y, -2.25, 1e-6);
+        EXPECT_NEAR((double)t->position.z, 30.5, 1e-6);
+        EXPECT_NEAR((double)t->scale.x, 1.0, 1e-6); // 默认 scale = 1，不是 0
+        EXPECT_NEAR((double)t->rotation.w, 1.0, 1e-6);
+    }
+    const scene_name_t *n = (const scene_name_t *)ecs_peek(world, kid, a.ids.name);
+    EXPECT_NOT_NULL(n);
+    if (n != NULL) {
+        EXPECT_STR_EQ(n->text, "手写的"); // UTF-8 名字要能原样回来
+    }
+    // 父子：dense 1 的父是 dense 0
+    EXPECT_TRUE(ecs_get_parent(world, kid) == cam);
+    EXPECT_TRUE(ecs_get_parent(world, cam) == ENTITY_NONE);
+    // 派生组件被跳过，但实体本身照建
+    EXPECT_TRUE(entity_is_valid(derived));
+    EXPECT_NULL(ecs_peek(world, derived, a.ids.world_transform));
+
+    io_fixture_end(&a);
+}
+
+// 5b. 省略的 u32 取默认值，不是 0xFFFFFFFF —— 这条是回归防线
+static void scene_json_omitted_u32_keeps_default(void)
+{
+    static const char *const k_doc =
+        "{"
+        "  \"meshes\": [ { \"name\": \"cube\" } ],"
+        "  \"entities\": [ { \"components\": ["
+        "     { \"type\": \"MeshRenderer\", \"fields\": { \"mesh\": \"cube\" } } ] } ]"
+        "}";
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_u32_a");
+    scene_io_stats_t stats;
+    EXPECT_TRUE(scene_read_json(a.scene, k_doc, strlen(k_doc), &stats));
+    ecs_world_t *world = scene_world(a.scene);
+    const scene_mesh_renderer_t *mr =
+        (const scene_mesh_renderer_t *)ecs_peek(world, ecs_entity_from_dense(world, 0u),
+                                                a.ids.mesh_renderer);
+    EXPECT_NOT_NULL(mr);
+    if (mr != NULL) {
+        // layer 与 cast_shadow 都没写 → 取默认记录的值。
+        // layer 的默认是 0；曾经这里是 ECS_DENSE_NONE（4294967295），
+        // 症状是"物体读进来了却怎么都不显示"，而且不报任何错。
+        EXPECT_EQ_U64(mr->layer, 0u);
+        EXPECT_TRUE(mr->cast_shadow == false);
+        // 写了的那个字段照常生效，而且名字要翻译成这条文档里的资源下标
+        EXPECT_EQ_U64(mr->mesh, scene_find_mesh(a.scene, "cube"));
+        EXPECT_TRUE(mr->mesh != (u32)SCENE_RESOURCE_NONE);
+        EXPECT_TRUE(mr->material == (u32)SCENE_RESOURCE_NONE); // 引用没写就是"无"
+    }
+    io_fixture_end(&a);
+}
+
+// 6. 文档写坏了：每一种都必须**整份拒绝**
+static void scene_json_rejects_bad_documents(void)
+{
+    static const char *const k_bad[] = {
+        "{ \"entities\": [] } { \"extra\": 1 }",      // 尾部垃圾（解析器就拒）
+        "{ \"entites\": [] }",                        // 顶层键拼错：静默忽略=空场景
+        "{ \"version\": 99 }",                        // 版本不支持
+        "{ \"kind\": \"level\" }",                    // kind 不认识
+        "{ \"environment\": 5 }",                     // 段类型不对
+        "{ \"meshes\": [ 5 ] }",                      // 数组元素不是对象
+        "{ \"meshes\": [ { \"name\": \"a\", \"nope\": 1 } ] }", // 记录里的未知键
+        "{ \"entities\": [ { \"components\": [ { \"type\": \"Transform\","
+        "  \"fields\": { \"position\": [1,2] } } ] } ] }",      // 向量分量不齐
+        "{ \"entities\": [ { \"components\": [ { \"type\": \"Transform\","
+        "  \"fields\": { \"position\": 1 } } ] } ] }",          // 该给数组却给了标量
+        "{ \"entities\": [ { \"components\": [ { \"type\": \"Camera\","
+        "  \"fields\": {} }, { \"type\": \"Camera\", \"fields\": {} } ] } ] }", // 组件重复
+        "{ \"entities\": [ { \"components\": [ { \"type\": \"Camera\""
+        "  \"fields\": {} } ] } ] }",                            // 语法错误（缺逗号）
+        "{ \"entities\": [ { \"components\": [ 7 ] } ] }",       // 组件记录不是对象
+        "{ \"entities\": [ { \"dense\": \"zero\" } ] }",         // dense 类型不对
+        "{ \"entities\": [ { \"parent\": -1 } ] }",             // 负数不是合法 dense
+        "{ \"name\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }",
+    };
+    const usize count = sizeof(k_bad) / sizeof(k_bad[0]);
+    for (usize i = 0; i < count; ++i) {
+        scene_io_fixture_t a;
+        io_fixture_begin(&a, "js_bad_a");
+        io_log_guard_t quiet;
+        io_quiet_logs(&quiet); // 每条都要报错，但不必刷屏
+        scene_io_stats_t stats;
+        const bool ok = scene_read_json(a.scene, k_bad[i], strlen(k_bad[i]), &stats);
+        io_restore_logs(&quiet);
+        if (ok) {
+            TF_CHECK(false, "第 %u 条坏文档被接受了：%.60s", (unsigned)i, k_bad[i]);
+        }
+        io_fixture_end(&a);
+    }
+}
+
+// 7. 版本漂移：不认识的类型按**类型**计数并跳过，其余照常读出来
+static void scene_json_drift_skips_by_type(void)
+{
+    static const char *const k_doc =
+        "{"
+        "  \"entities\": ["
+        "    { \"components\": [ { \"type\": \"NotAComponent\", \"fields\": {} } ] },"
+        "    { \"components\": [ { \"type\": \"NotAComponent\", \"fields\": {} },"
+        "                         { \"type\": \"Name\", \"fields\": { \"text\": \"还在\" } } ] },"
+        "    { \"components\": [ { \"type\": \"MeshRenderer\","
+        "                         \"fields\": { \"layer\": 3, \"cast_shadow\": true } },"
+        "                         { \"type\": \"Name\", \"fields\": { \"text\": \"无网格\" } } ] }"
+        "  ]"
+        "}";
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_drift_a");
+    io_log_guard_t quiet;
+    io_quiet_logs(&quiet);
+    scene_io_stats_t stats;
+    const bool ok = scene_read_json(a.scene, k_doc, strlen(k_doc), &stats);
+    io_restore_logs(&quiet);
+
+    EXPECT_TRUE(ok);
+    EXPECT_EQ_U64(stats.entities_loaded, 3u);
+    // 一个不认识的类型出现了两次，计数是 **1** 而不是 2：单位是类型，不是实例
+    EXPECT_EQ_U64(stats.unknown_component_types, 1u);
+    EXPECT_EQ_U64(stats.schema_mismatches, 0u);
+    // 落地的组件：Name×2 + MeshRenderer×1 = 3（两条 NotAComponent 被丢掉）
+    EXPECT_EQ_U64(stats.components_loaded, 3u);
+
+    ecs_world_t *world = scene_world(a.scene);
+    const scene_name_t *n1 =
+        (const scene_name_t *)ecs_peek(world, ecs_entity_from_dense(world, 1u), a.ids.name);
+    EXPECT_NOT_NULL(n1);
+    if (n1 != NULL) {
+        EXPECT_STR_EQ(n1->text, "还在");
+    }
+    // MeshRenderer 那两条字段都在表里，所以正常落地
+    const scene_mesh_renderer_t *mr =
+        (const scene_mesh_renderer_t *)ecs_peek(world, ecs_entity_from_dense(world, 2u),
+                                                a.ids.mesh_renderer);
+    EXPECT_NOT_NULL(mr);
+    if (mr != NULL) {
+        EXPECT_EQ_U64(mr->layer, 3u);
+        EXPECT_TRUE(mr->cast_shadow == true);
+    }
+    io_fixture_end(&a);
+}
+
+// 7b. 字段名不在表里 = 布局漂移 → 整个类型作废（与二进制的 schema 哈希同一条判断）
+static void scene_json_unknown_field_voids_type(void)
+{
+    static const char *const k_doc =
+        "{"
+        "  \"entities\": ["
+        "    { \"components\": [ { \"type\": \"Light\", \"fields\":"
+        "        { \"color\": [1,1,1], \"intensity\": 2.5 } } ] },"
+        "    { \"components\": [ { \"type\": \"Light\", \"fields\":"
+        "        { \"brightness\": 3.0 } } ] },"
+        "    { \"components\": [ { \"type\": \"Name\", \"fields\": { \"text\": \"活着\" } } ] }"
+        "  ]"
+        "}";
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_field_a");
+    io_log_guard_t quiet;
+    io_quiet_logs(&quiet);
+    scene_io_stats_t stats;
+    const bool ok = scene_read_json(a.scene, k_doc, strlen(k_doc), &stats);
+    io_restore_logs(&quiet);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ_U64(stats.schema_mismatches, 1u); // 按类型计一次，不是按实例
+    EXPECT_EQ_U64(stats.unknown_component_types, 0u);
+    EXPECT_EQ_U64(stats.entities_loaded, 3u);
+
+    ecs_world_t *world = scene_world(a.scene);
+    // 两条 Light **全都**没了 —— 包括那条字段写对了的。
+    // 为什么不是"忽略不认识的那个字段、其余照常"：字段表算出的字节块里,
+    // 顺序与偏移就是格式本身，认不出键名意味着这份文件的表形状和这个引擎的
+    // 不是一套，剩下那几个字段该按哪套摆没人知道。
+    EXPECT_NULL(ecs_peek(world, ecs_entity_from_dense(world, 0u), a.ids.light));
+    EXPECT_NULL(ecs_peek(world, ecs_entity_from_dense(world, 1u), a.ids.light));
+    // 其余类型不受影响：一个坏类型不毁掉整个场景
+    const scene_name_t *n =
+        (const scene_name_t *)ecs_peek(world, ecs_entity_from_dense(world, 2u), a.ids.name);
+    EXPECT_NOT_NULL(n);
+    if (n != NULL) {
+        EXPECT_STR_EQ(n->text, "活着");
+    }
+    io_fixture_end(&a);
+}
+
+// 8. 预制体的 JSON 形式：带根、环境不应用
+static void scene_json_prefab_roundtrip(void)
+{
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_pf_a");
+    io_build_scene(&a);
+    const entity_t root = io_find_by_name(&a, "root");
+    EXPECT_TRUE(entity_is_valid(root));
+
+    allocator_tracking_t tracker;
+    allocator_tracking_init(&tracker, allocator_heap());
+    arena_t arena;
+    EXPECT_TRUE(arena_init(&arena, &tracker.base, 1024u * 1024u, "js_pf_arena"));
+    void *text = NULL;
+    usize length = 0u;
+    EXPECT_TRUE(scene_write_prefab_json(a.scene, root, &arena, &text, &length, NULL));
+
+    scene_io_fixture_t b;
+    io_fixture_begin(&b, "js_pf_b");
+    // 环境放一个**两个场景都不该有**的值：预制体不许改它，被覆盖就能看出来。
+    // （只比"与源场景不同"是不够的 —— 两边碰巧相同的话这条断言就白写了。）
+    scene_env_t *env = scene_environment(b.scene);
+    env->msaa_samples = 4095u;
+    env->exposure = -7.5f;
+    const u32 msaa_before = env->msaa_samples;
+    EXPECT_TRUE(msaa_before != scene_environment(a.scene)->msaa_samples);
+
+    scene_io_stats_t stats;
+    entity_t loaded_root = ENTITY_NONE;
+    EXPECT_TRUE(scene_read_json_root(b.scene, (const char *)text, length, &stats, &loaded_root));
+    EXPECT_TRUE(entity_is_valid(loaded_root));
+    EXPECT_EQ_U64(stats.unknown_component_types, 0u);
+    EXPECT_EQ_U64(stats.dangling_refs, 0u);
+    EXPECT_EQ_U64(scene_environment(b.scene)->msaa_samples, msaa_before); // 没被覆盖
+    EXPECT_NEAR((double)scene_environment(b.scene)->exposure, -7.5, 1e-6);
+    EXPECT_EQ_U64(scene_subtree_size(b.scene, loaded_root), scene_subtree_size(a.scene, root));
+    // 预制体只带被引用到的资源，所以目标场景的资源表**不该**是源场景那么大
+    EXPECT_TRUE(scene_mesh_count(b.scene) <= scene_mesh_count(a.scene));
+
+    io_fixture_end(&b);
+    io_fixture_end(&a);
+    arena_destroy(&arena);
+    EXPECT_FALSE(allocator_tracking_has_leak(&tracker));
+}
+
+// 9. JSON 存不下非有限浮点，而二进制能 —— 这条差别必须可见
+static void scene_json_rejects_non_finite(void)
+{
+    scene_io_fixture_t a;
+    io_fixture_begin(&a, "js_nan_a");
+    io_build_scene(&a);
+    scene_environment(a.scene)->exposure = (f32)(0.0 / 0.0); // NaN
+
+    allocator_tracking_t tracker;
+    allocator_tracking_init(&tracker, allocator_heap());
+    arena_t arena;
+    EXPECT_TRUE(arena_init(&arena, &tracker.base, 1024u * 1024u, "js_nan_arena"));
+
+    // 二进制：什么位模式都存得下
+    void *bytes = NULL;
+    usize size = 0u;
+    EXPECT_TRUE(io_write(&a, &arena, &bytes, &size, NULL));
+
+    // JSON：写出 "NaN" 会产出不合法的文档，所以必须拒绝而不是将就
+    void *text = NULL;
+    usize length = 0u;
+    io_log_guard_t quiet;
+    io_quiet_logs(&quiet);
+    const bool saved = scene_write_json(a.scene, &arena, &text, &length, NULL);
+    io_restore_logs(&quiet);
+    EXPECT_FALSE(saved);
+    EXPECT_NULL(text);
+
+    io_fixture_end(&a);
+    arena_destroy(&arena);
+    EXPECT_FALSE(allocator_tracking_has_leak(&tracker));
+}
+
+// 10. 空文档与"什么段都没写"
+static void scene_json_minimal_documents(void)
+{
+    static const char *const k_docs[] = {
+        "{}",
+        "{ }",
+        "{\"entities\":[]}",
+        "{\"environment\":{},\"meshes\":[],\"atlases\":[],\"materials\":[],\"entities\":[]}",
+        "{\"entities\":[{\"components\":[]}]}",
+    };
+    const usize count = sizeof(k_docs) / sizeof(k_docs[0]);
+    for (usize i = 0; i < count; ++i) {
+        scene_io_fixture_t a;
+        io_fixture_begin(&a, "js_min_a");
+        io_log_guard_t quiet;
+        io_quiet_logs(&quiet);
+        scene_io_stats_t stats;
+        const bool ok = scene_read_json(a.scene, k_docs[i], strlen(k_docs[i]), &stats);
+        io_restore_logs(&quiet);
+        if (!ok) {
+            TF_CHECK(false, "第 %u 份最小文档被拒：%.40s", (unsigned)i, k_docs[i]);
+            continue;
+        }
+        EXPECT_EQ_U64(stats.unknown_component_types, 0u);
+        EXPECT_EQ_U64(stats.schema_mismatches, 0u);
+        // 空场景的存档仍然是**满长度**的（所有类型都登记了，一条实体都没有）：
+        // 于是"注册表变了"仍然能被读出来，而不是靠实体数量猜。
+        void *bytes = NULL;
+        usize size = 0u;
+        allocator_tracking_t tracker;
+        allocator_tracking_init(&tracker, allocator_heap());
+        arena_t arena;
+        EXPECT_TRUE(arena_init(&arena, &tracker.base, 64u * 1024u, "js_min_arena"));
+        EXPECT_TRUE(scene_write_binary(a.scene, &arena, &bytes, &size, NULL));
+        EXPECT_GT_U64(size, SCENE_FILE_HEADER_SIZE);
+        u32 entities = 0u, kind = 0u;
+        EXPECT_TRUE(scene_archive_peek(bytes, size, &entities, &kind));
+        EXPECT_EQ_U64(entities, (i >= 4u) ? 1u : 0u);
+        EXPECT_EQ_U64(kind, (u32)SCENE_ARCHIVE_SCENE);
+        arena_destroy(&arena);
+        EXPECT_FALSE(allocator_tracking_has_leak(&tracker));
+        io_fixture_end(&a);
+    }
+}
+
+// =============================================================================
 void test_scene_io_register(void)
 {
     test_register("scene_io", "empty_scene_roundtrips", scene_io_empty_scene_roundtrips);
@@ -959,4 +1619,22 @@ void test_scene_io_register(void)
     test_register("scene_io", "read_side_reports_missing_resource",
                   scene_io_read_side_reports_missing_resource);
     test_register("scene_io", "file_roundtrip", scene_io_file_roundtrip);
+
+    // JSON 形式（转码）。判据分三层，见上面的分节注释。
+    test_register("scene_io", "json_transcode_is_lossless", scene_json_transcode_is_lossless);
+    test_register("scene_io", "json_cross_format_equivalent",
+                  scene_json_cross_format_equivalent);
+    test_register("scene_io", "json_text_is_stable", scene_json_text_is_stable);
+    test_register("scene_io", "json_file_roundtrip", scene_json_file_roundtrip);
+    test_register("scene_io", "json_path_suffix_rules", scene_json_path_suffix_rules);
+    test_register("scene_io", "json_hand_written_defaults", scene_json_hand_written_defaults);
+    test_register("scene_io", "json_omitted_u32_keeps_default",
+                  scene_json_omitted_u32_keeps_default);
+    test_register("scene_io", "json_rejects_bad_documents", scene_json_rejects_bad_documents);
+    test_register("scene_io", "json_drift_skips_by_type", scene_json_drift_skips_by_type);
+    test_register("scene_io", "json_unknown_field_voids_type",
+                  scene_json_unknown_field_voids_type);
+    test_register("scene_io", "json_prefab_roundtrip", scene_json_prefab_roundtrip);
+    test_register("scene_io", "json_rejects_non_finite", scene_json_rejects_non_finite);
+    test_register("scene_io", "json_minimal_documents", scene_json_minimal_documents);
 }

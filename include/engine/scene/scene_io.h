@@ -1,5 +1,5 @@
 // =============================================================================
-//  engine/scene/scene_io.h —— 场景存读（二进制）
+//  engine/scene/scene_io.h —— 场景存读（二进制 + JSON 两种编码）
 //
 //  ---- 一套遍历服务三处数据 ----
 //
@@ -63,8 +63,23 @@
 //  所以判据准确地说是"任意场景读一遍之后，往返逐字节一致"，
 //  而 tests 里那条 dense_holes 就是钉这个的。
 //
-//  JSON 形式挪到 M11（编辑器/工具链）：那时它有明确的使用者，
-//  而且只需给这套遍历再加一个 sink，不必在 M5 同时验证两条输出路径。
+//  ---- 两种编码：二进制与 JSON ----
+//
+// 同一份存档有两种形式。**JSON 不是第二套序列化器**：它是二进制存档的转码
+// （见 src/scene/scene_json.c 的文件头）。为什么：
+//
+// * "哪些实体进存档、按什么顺序、引用子树外的实体怎么算、预制体带哪几条资源"
+//   这些问题各自有答案，而两份实现会让它们在某个时刻分叉 —— 本阶段查出的
+//   格式 bug 全部来自"同一个量算两遍、两遍不一样"这一个形状。
+// * 转码之所以可能，是因为二进制格式自己就是自描述的：资源落名字、
+//   实体引用落 dense id、记录长度可纯从字段表算出。
+// * 于是校验只有 scene_io_read_archive 一处，两种编码共用同一个守门人。
+//
+// 两种形式的取舍：二进制是引擎默认用的（小、快、什么值都存得下）；
+// JSON 是给人看、给人手改的（可以只写关心的那几个字段，省略的取默认值：
+// 组件走 construct、环境走 scene_env_default()、材质走 material_default()）。
+// 一处必须的差别：JSON 没有 NaN/Infinity 的字面量，所以**含非有限浮点的场景
+// 存不成 JSON**（会明确报错而不是产出非法文档），二进制不受这条限制。
 // =============================================================================
 #ifndef ENGINE_SCENE_SCENE_IO_H
 #define ENGINE_SCENE_SCENE_IO_H
@@ -161,6 +176,52 @@ u32 scene_subtree_size(scene_t *scene, entity_t root);
 // 而它的反面（先 ecs_world_clear 再 load）是两行一目了然的代码。
 bool scene_save_binary(scene_t *scene, const char *path, scene_io_stats_t *out_stats);
 bool scene_load_binary(scene_t *scene, const char *path, scene_io_stats_t *out_stats);
+
+// ---------------------------------------------------------------- JSON 形式
+//
+// 与上面六个函数**语义完全等价**，只是编码不同（实现是转码，理由见文件头）。
+// 名字成对：scene_write_json ↔ scene_write_binary，如此类推。
+//
+// out_text/out_length 给出 JSON 文本；缓冲区末尾会多写一个 NUL，
+// 所以可以直接当 C 字符串打印与断言，但 *out_length 不含它。
+// 文本分配在调用方给的 arena 上（save/load 两个入口自己走 scratch 并丢掉）。
+//
+// 手写的文件可以只写关心的字段：环境、三段资源、实体四段都是可选的，
+// 记录里没写的字段取默认值。但**形状**必须对：向量分量要齐、顶层不许有认不出的键、
+// 一个实体里同一组件不能出现两次 —— 这类错误会整份拒绝并点名，见 scene_json.c。
+bool scene_write_json(scene_t *scene, arena_t *arena, void **out_text, usize *out_length,
+                      scene_io_stats_t *out_stats);
+bool scene_read_json(scene_t *scene, const char *text, usize length, scene_io_stats_t *out_stats);
+bool scene_read_json_root(scene_t *scene, const char *text, usize length,
+                          scene_io_stats_t *out_stats, entity_t *out_root);
+bool scene_write_prefab_json(scene_t *scene, entity_t root, arena_t *arena, void **out_text,
+                             usize *out_length, scene_io_stats_t *out_stats);
+bool scene_save_json(scene_t *scene, const char *path, scene_io_stats_t *out_stats);
+bool scene_save_prefab_json(scene_t *scene, entity_t root, const char *path,
+                            scene_io_stats_t *out_stats);
+bool scene_load_json(scene_t *scene, const char *path, scene_io_stats_t *out_stats);
+
+// ---- 两种编码互转（"两者可互相转换"这条判据的显式形状）----
+//
+// 都不读进场景、也不改场景状态：只借场景的**组件注册表**去解释类型表
+// （没有字段表就读不出记录，两种方向都一样）。
+// 为什么把转码公开出来而不是让调用方走"读进来再写出去"：
+// 后者会顺手做一遍 dense 压实与资源表重建，于是"转换有没有丢内容"
+// 这件该单独问的事，被混进"加载会不会规范化"里问不出来了。
+// 逐字节比对这两条的结果，才是"两种编码描述同一份数据"的直接证据。
+bool scene_json_from_binary(scene_t *scene, const void *bytes, usize size, arena_t *arena,
+                            void **out_text, usize *out_length);
+bool scene_binary_from_json(scene_t *scene, const char *text, usize length, arena_t *arena,
+                            void **out_bytes, usize *out_size);
+
+// 按文件扩展名挑格式：".json"（大小写不敏感）走 JSON，其余走二进制。
+// 为什么放引擎里而不是让每个调用方自己 strcmp 后缀：06_scene、编辑器、
+// 热重载 watcher 都要回答"这个文件是什么编码"，而答错的症状是
+// "二进制存档被当 JSON 解析，报一个看不懂的语法错误"。
+// 存盘没有 *_auto：路径是调用方决定的，"同一个路径下一次是二进制下一次是 JSON"
+// 正是最难归因的一类 bug，所以存哪一种是显式调用哪个函数的事。
+bool scene_path_is_json(const char *path);
+bool scene_load_auto(scene_t *scene, const char *path, scene_io_stats_t *out_stats);
 
 // 整张注册表的合并 schema 哈希，写进文件头。
 // 一次比较就回答"这份存档是不是这个版本的引擎能读的"。

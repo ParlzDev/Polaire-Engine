@@ -450,6 +450,50 @@ static void json_writer_escapes_control_chars(void)
     fixture_end(&fx);
 }
 
+// 同一行的数组：向量的三个分量各占一行会让场景文件涨成三倍长，
+// 而那种文件的主要用途就是"扫一眼，改掉其中一个数"。
+static void json_writer_inline_arrays(void)
+{
+    json_fixture_t fx;
+    fixture_begin(&fx, "json_inline");
+
+    u8 buffer[256];
+    bio_writer_t bio;
+    bio_writer_init(&bio, buffer, sizeof(buffer));
+    json_writer_t w;
+    json_writer_init(&w, &bio, 2u);
+
+    EXPECT_TRUE(json_begin_object(&w) && json_write_key(&w, "pos") &&
+                json_begin_array_inline(&w) && json_write_u32(&w, 0u) &&
+                json_write_f32(&w, -0.5f) && json_write_u32(&w, 0u) && json_end_array(&w) &&
+                json_write_key(&w, "rows") && json_begin_array(&w) && json_write_u32(&w, 1u) &&
+                json_write_u32(&w, 2u) && json_end_array(&w) &&
+                json_write_key(&w, "none") && json_begin_array_inline(&w) && json_end_array(&w) &&
+                json_end_object(&w));
+    EXPECT_TRUE(json_writer_ok(&w));
+    buffer[bio_writer_used(&bio)] = '\0';
+
+    EXPECT_STR_EQ((const char *)buffer,
+                  "{\n  \"pos\": [0, -0.5, 0],\n  \"rows\": [\n    1,\n    2\n  ],\n"
+                  "  \"none\": []\n}");
+
+    // 排版换了，语义没换：读回来仍然是三个分量，而且普通数组照旧分行
+    const json_value_t *root = parse_ok(&fx, (const char *)buffer);
+    EXPECT_NOT_NULL(root);
+    if (root != NULL) {
+        const json_value_t *pos = json_object_get(root, "pos");
+        EXPECT_EQ_U64(pos->kind == JSON_ARRAY, 1u);
+        EXPECT_EQ_U64(pos->item_count, 3u);
+        EXPECT_NEAR((double)json_get_f32(pos, "x", 99.0f), 99.0, 1e-6); // 数组没有 key，取默认
+        f32 second = 0.0f;
+        EXPECT_TRUE(json_as_f32(json_array_at(pos, 1u), &second));
+        EXPECT_NEAR((double)second, -0.5, 1e-6);
+        EXPECT_EQ_U64(json_object_get(root, "none")->item_count, 0u);
+    }
+
+    fixture_end(&fx);
+}
+
 // =============================================================================
 void test_json_register(void)
 {
@@ -469,4 +513,5 @@ void test_json_register(void)
     test_register("json", "writer_does_not_overflow_buffer", json_writer_does_not_overflow_buffer);
     test_register("json", "pretty_output_layout", json_pretty_output_layout);
     test_register("json", "writer_escapes_control_chars", json_writer_escapes_control_chars);
+    test_register("json", "writer_inline_arrays_stay_on_one_line", json_writer_inline_arrays);
 }

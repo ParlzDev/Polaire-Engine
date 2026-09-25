@@ -874,8 +874,16 @@ static bool json_separator(json_writer_t *w)
                 return false;
             }
         }
-        // 根值自己不缩进：否则美化输出会以一个多余的空行开头
-        if (!json_indent(w, level)) {
+        // 这一层是"同一行"的容器（向量的三个分量、八个槽位名）：
+        // 只补一个空格，不换行。理由写在 json.h 的字段注释里。
+        if (w->inline_at[level]) {
+            if (!w->empty[level]) {
+                if (!json_char(w, ' ')) {
+                    return false;
+                }
+            }
+        } else if (!json_indent(w, level)) {
+            // 根值自己不缩进：否则美化输出会以一个多余的空行开头
             return false;
         }
     }
@@ -883,7 +891,7 @@ static bool json_separator(json_writer_t *w)
     return true;
 }
 
-static bool json_push(json_writer_t *w, char open)
+static bool json_push(json_writer_t *w, char open, bool inline_level)
 {
     if (!json_separator(w)) {
         return false;
@@ -901,6 +909,7 @@ static bool json_push(json_writer_t *w, char open)
     // 而且不报错，只在下一次解析时表现为"少字段"。
     w->depth++;
     w->empty[w->depth] = true;
+    w->inline_at[w->depth] = inline_level;
     return true;
 }
 
@@ -912,8 +921,9 @@ static bool json_pop(json_writer_t *w, char open, char close)
         return false;
     }
     w->depth--;
-    // 有成员时才需要换行收尾，空容器写成 {} / []
-    if (!w->empty[w->depth + 1u]) {
+    // 有成员时才需要换行收尾，空容器写成 {} / []；
+    // 同一行的容器（json_begin_array_inline）收尾不换行。
+    if (!w->empty[w->depth + 1u] && !w->inline_at[w->depth + 1u]) {
         if (!json_indent(w, w->depth)) {
             return false;
         }
@@ -924,7 +934,7 @@ static bool json_pop(json_writer_t *w, char open, char close)
 
 bool json_begin_object(json_writer_t *w)
 {
-    return json_push(w, '{');
+    return json_push(w, '{', false);
 }
 
 bool json_end_object(json_writer_t *w)
@@ -934,7 +944,12 @@ bool json_end_object(json_writer_t *w)
 
 bool json_begin_array(json_writer_t *w)
 {
-    return json_push(w, '[');
+    return json_push(w, '[', false);
+}
+
+bool json_begin_array_inline(json_writer_t *w)
+{
+    return json_push(w, '[', true);
 }
 
 bool json_end_array(json_writer_t *w)
