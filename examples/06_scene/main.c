@@ -1264,11 +1264,15 @@ cleanup:
 
     // 这个示例跑的是完整生命周期，所以泄漏检查是真的在检查：
     // 场景、预制体、精灵批、阴影各自的分配都要成对收回。
+    // 两个分支都要说话：只报坏消息的验收清单，"没消息"会被当成"没检查"。
     if (allocator_tracking_has_leak(&tracker)) {
         fprintf(stderr, "检测到内存泄漏：%llu 块 / %llu 字节未释放\n",
                 (unsigned long long)tracker.live_blocks,
                 (unsigned long long)tracker.bytes_in_use);
         exit_code = 1;
+    } else {
+        printf("内存泄漏             : 无（%llu 字节全部归还）\n",
+               (unsigned long long)tracker.total_bytes);
     }
     log_shutdown();
     return exit_code;
