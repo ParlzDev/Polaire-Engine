@@ -357,9 +357,18 @@ static void pool_generation_prevents_dangling_handle(void)
     POOL_GET_AS(&pool, first, test_object_t)->id = 111;
     EXPECT_TRUE(pool_free(&pool, first));
 
-    // 下一个分配会复用同一个槽位
-    handle_t second = pool_alloc(&pool);
-    EXPECT_EQ_U64(handle_index(first), handle_index(second));
+    // 空闲队列是 FIFO（见 pool_t.free_tail 的注释），所以想拿回**同一个槽位**
+    // 必须先把队列里其它空槽发完。这里把 4 个槽位依次发出，
+    // 最后一个拿到的才可能与 first 同槽 —— 这才是 ABA 场景。
+    handle_t second = HANDLE_INVALID;
+    for (u32 i = 0; i < 4u; ++i) {
+        handle_t h = pool_alloc(&pool);
+        EXPECT_TRUE(handle_is_valid(h));
+        if (handle_index(h) == handle_index(first)) {
+            second = h;
+        }
+    }
+    EXPECT_TRUE(handle_is_valid(second));
     EXPECT_TRUE(first != second);
     EXPECT_EQ_U64(handle_generation(second), (u8)(handle_generation(first) + 1u));
 
@@ -394,6 +403,67 @@ static void pool_generation_wraps_without_breaking(void)
         EXPECT_TRUE(handle_generation(handle) >= 1u); // 永不出现 0 代际
         EXPECT_NOT_NULL(pool_get(&pool, handle));
         EXPECT_TRUE(pool_free(&pool, handle));
+    }
+
+    pool_destroy(&pool);
+}
+
+// 空闲链表必须是 FIFO（轮转发放），不是栈。
+// 这条行为保证"刚释放的槽位在其它空槽发完之前不会被再次发出"，从而把
+// 8 位代际的回绕周期从 256 次放大到约 256 × 空闲槽数。
+// 写成 LIFO 的话：热路径上反复 alloc/free 同一个槽位，几百次之后
+// 陈旧句柄会重新变成"有效"，而且指向另一个对象 —— 幽灵 bug，无法复现。
+static void pool_free_list_is_fifo_round_robin(void)
+{
+    const u32 count = 4u;
+    pool_t    pool;
+    EXPECT_TRUE(pool_init(&pool, allocator_heap(), sizeof(test_object_t), count, "fifo"));
+
+    handle_t handles[4];
+    for (u32 i = 0; i < count; ++i) {
+        handles[i] = pool_alloc(&pool);
+        EXPECT_TRUE(handle_is_valid(handles[i]));
+        EXPECT_EQ_U64(handle_index(handles[i]), i + 1u); // 0 号槽永久保留
+    }
+    EXPECT_TRUE(handle_equal(pool_alloc(&pool), HANDLE_INVALID)); // 池满
+
+    // 释放前三个，空闲队列顺序应为 1 -> 2 -> 3；最后那个保持占用，
+    // 这样"队列里有多个空槽"的情形才成立（只剩一个空槽时 FIFO 与 LIFO 无法区分）。
+    EXPECT_TRUE(pool_free(&pool, handles[0]));
+    EXPECT_TRUE(pool_free(&pool, handles[1]));
+    EXPECT_TRUE(pool_free(&pool, handles[2]));
+
+    const handle_t a = pool_alloc(&pool);
+    const handle_t b = pool_alloc(&pool);
+    const handle_t c = pool_alloc(&pool);
+    EXPECT_EQ_U64(handle_index(a), 1u); // LIFO 会在这里给出 3
+    EXPECT_EQ_U64(handle_index(b), 2u);
+    EXPECT_EQ_U64(handle_index(c), 3u);
+
+    // 再验一次"最早释放的先发"：还回 a、b 之后先发的是 a 的那个槽位。
+    EXPECT_TRUE(pool_free(&pool, a));
+    EXPECT_TRUE(pool_free(&pool, b));
+    const handle_t delayed = pool_alloc(&pool);
+    EXPECT_EQ_U64(handle_index(delayed), handle_index(a));
+
+    pool_destroy(&pool);
+}
+
+// 单槽池是队列的退化情形，alloc/free 交替仍要正确
+// （free_tail 在队列清空时没一起清掉的话，这里链表就断了）。
+static void pool_single_slot_alloc_free_loop(void)
+{
+    pool_t pool;
+    EXPECT_TRUE(pool_init(&pool, allocator_heap(), sizeof(test_object_t), 1, "single"));
+
+    for (u32 i = 0; i < 300u; ++i) {
+        handle_t h = pool_alloc(&pool);
+        EXPECT_TRUE(handle_is_valid(h));
+        EXPECT_EQ_U64(pool_count(&pool), 1u);
+        EXPECT_NOT_NULL(pool_get(&pool, h));
+        EXPECT_TRUE(pool_free(&pool, h));
+        EXPECT_EQ_U64(pool_count(&pool), 0u);
+        EXPECT_NULL(pool_get(&pool, h));
     }
 
     pool_destroy(&pool);
@@ -600,6 +670,9 @@ void test_memory_register(void)
                   pool_generation_prevents_dangling_handle);
     test_register("memory", "pool_generation_wraps_without_breaking",
                   pool_generation_wraps_without_breaking);
+    test_register("memory", "pool_free_list_is_fifo_round_robin",
+                  pool_free_list_is_fifo_round_robin);
+    test_register("memory", "pool_single_slot_alloc_free_loop", pool_single_slot_alloc_free_loop);
     test_register("memory", "pool_full_returns_invalid", pool_full_returns_invalid);
     test_register("memory", "pool_iteration_visits_only_live_slots",
                   pool_iteration_visits_only_live_slots);

@@ -199,7 +199,16 @@ typedef struct pool_t {
     u32          slot_size;
     u32          live_count;
     u32          peak_live;
-    u32          free_head; // 空闲链表头；POOL_NIL 表示池已满
+    u32          free_head; // 空闲队列头；POOL_NIL 表示池已满
+    // 空闲**队列**（不是栈）。释放的槽位排到尾部，分配从头部取。
+    //
+    // 为什么不是 LIFO：代际只有 8 位（要和 handle_t 的位域对齐），
+    // 同一槽位复用 256 次后代际回绕，此时持有旧句柄的代码会**重新看到
+    // 一个"有效"的句柄**，指向一个完全不同的对象 —— 表现是"早就销毁的
+    // 敌人又活了过来"，且不复现。LIFO 下一个热点槽位几秒就能烧完 256 次；
+    // 改成 FIFO 后回收要先把其它空槽发完，回绕周期从 256 放大到
+    // 约 256 × 空闲槽数，实际不可达。
+    u32          free_tail;
     u32          free_count;
     u32          alloc_calls;
     u32          free_calls;

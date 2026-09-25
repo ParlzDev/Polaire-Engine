@@ -10,71 +10,18 @@
 #include <string.h>
 
 #include "engine/core/assert.h"
+#include "engine/core/byte_io.h"
 #include "engine/core/log.h"
 
-// 头部字段偏移。集中成宏，让"布局"只有一处定义。
-#define MF_OFF_MAGIC 0u
-#define MF_OFF_VERSION 4u
-#define MF_OFF_VERTEX_COUNT 8u
-#define MF_OFF_INDEX_COUNT 12u
-#define MF_OFF_VERTEX_STRIDE 16u
-#define MF_OFF_NAME_LENGTH 20u
-#define MF_OFF_BOUNDS_MIN 24u
-#define MF_OFF_BOUNDS_MAX 36u
-// 48..63 是 reserved。写入时恒为 0，读取时**不校验** ——
-// 校验 reserved 会把"将来拿它当 flags"的路堵死，而版本不兼容该由 version 负责。
-
-// ---------------------------------------------------------------- 字节读写
+// 头部字段顺序即文件布局（偏移表见 mesh_file.h）：
+//   magic | version | vertex_count | index_count | vertex_stride | name_length
+//   | bounds_min f32[3] | bounds_max f32[3] | reserved 16 字节
+// 写入端与读取端按同一顺序逐个读写，字节序与对齐由 core/byte_io 负责。
+// 两边一旦漂移，tests/test_mesh_file.c 的 header_bytes_match_spec 会逐字节抓出来。
 //
-// 用 memcpy 而不是 *(u32*)ptr = value：
-//   1. 头部是按偏移从缓冲区里切的，编译器有权假设指针不对齐；
-//   2. 直接强转还违反严格别名规则。
-//   memcpy 让编译器自己决定用什么指令，两个问题都没有。
-
-static void mf_put_u32(u8 *dst, u32 value)
-{
-    // 显式小端：文件格式的字节序与主机字节序解耦（架构要预留 Linux/macOS）。
-    dst[0] = (u8)(value & 0xFFu);
-    dst[1] = (u8)((value >> 8) & 0xFFu);
-    dst[2] = (u8)((value >> 16) & 0xFFu);
-    dst[3] = (u8)((value >> 24) & 0xFFu);
-}
-
-static u32 mf_get_u32(const u8 *src)
-{
-    return (u32)src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16) | ((u32)src[3] << 24);
-}
-
-static void mf_put_f32(u8 *dst, f32 value)
-{
-    u32 bits = 0u;
-    memcpy(&bits, &value, sizeof(bits));
-    mf_put_u32(dst, bits);
-}
-
-static f32 mf_get_f32(const u8 *src)
-{
-    const u32 bits = mf_get_u32(src);
-    f32       value = 0.0f;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-// vec3_t 是 16 字节（含 pad），文件里每个包围盒只占 12 字节。
-static void mf_put_bounds(u8 *dst, const vec3_t *value)
-{
-    mf_put_f32(dst + 0u, value->x);
-    mf_put_f32(dst + 4u, value->y);
-    mf_put_f32(dst + 8u, value->z);
-}
-
-static void mf_get_bounds(const u8 *src, vec3_t *out)
-{
-    out->x = mf_get_f32(src + 0u);
-    out->y = mf_get_f32(src + 4u);
-    out->z = mf_get_f32(src + 8u);
-    out->pad = 0.0f; // pad 不是数据，但给个确定值便于调试与 memcmp
-}
+// reserved 区（48..63）写入恒为 0，读取时**不校验** ——
+// 校验 reserved 会把"将来拿它当 flags"的路堵死，而版本不兼容该由 version 负责。
+#define MF_RESERVED_BYTES 16u
 
 // 数量 * 元素大小，溢出时返回 false。
 // 不用"返回 0 表示失败"：index_count 为 0 时字节数本来就是 0，
@@ -134,29 +81,30 @@ bool mesh_file_build(arena_t *arena, const mesh_vertex_t *vertices, u32 vertex_c
         return false;
     }
 
-    memset(buffer, 0, MESH_FILE_HEADER_SIZE);
-    mf_put_u32(buffer + MF_OFF_MAGIC, MESH_FILE_MAGIC);
-    mf_put_u32(buffer + MF_OFF_VERSION, MESH_FILE_VERSION);
-    mf_put_u32(buffer + MF_OFF_VERTEX_COUNT, vertex_count);
-    mf_put_u32(buffer + MF_OFF_INDEX_COUNT, index_count);
-    mf_put_u32(buffer + MF_OFF_VERTEX_STRIDE, (u32)sizeof(mesh_vertex_t));
-    mf_put_u32(buffer + MF_OFF_NAME_LENGTH, (u32)name_length);
+    bio_writer_t w;
+    bio_writer_init(&w, buffer, total);
 
     const vec3_t zero = vec3_zero();
-    mf_put_bounds(buffer + MF_OFF_BOUNDS_MIN, (bounds_min != NULL) ? bounds_min : &zero);
-    mf_put_bounds(buffer + MF_OFF_BOUNDS_MAX, (bounds_max != NULL) ? bounds_max : &zero);
+    const vec3_t *bmin = (bounds_min != NULL) ? bounds_min : &zero;
+    const vec3_t *bmax = (bounds_max != NULL) ? bounds_max : &zero;
 
-    usize offset = MESH_FILE_HEADER_SIZE;
-    memcpy(buffer + offset, vertices, vertex_bytes);
-    offset += vertex_bytes;
-    if (index_bytes > 0u) {
-        memcpy(buffer + offset, indices, index_bytes);
-        offset += index_bytes;
-    }
-    if (name_length > 1u) {
-        memcpy(buffer + offset, name, name_length);
-    } else {
-        buffer[offset] = 0u;
+    bool ok = bio_write_u32(&w, MESH_FILE_MAGIC) && bio_write_u32(&w, MESH_FILE_VERSION) &&
+              bio_write_u32(&w, vertex_count) && bio_write_u32(&w, index_count) &&
+              bio_write_u32(&w, (u32)sizeof(mesh_vertex_t)) &&
+              bio_write_u32(&w, (u32)name_length) &&
+              bio_write_f32(&w, bmin->x) && bio_write_f32(&w, bmin->y) && bio_write_f32(&w, bmin->z) &&
+              bio_write_f32(&w, bmax->x) && bio_write_f32(&w, bmax->y) && bio_write_f32(&w, bmax->z) &&
+              bio_write_zeros(&w, MF_RESERVED_BYTES) && bio_write_bytes(&w, vertices, vertex_bytes) &&
+              bio_write_bytes(&w, indices, index_bytes) &&
+              (name_length > 1u ? bio_write_bytes(&w, name, name_length)
+                                : bio_write_u8(&w, 0u));
+
+    // 写入端是"往自己算出来的缓冲区里写"，理论上不会失败；
+    // 真失败了说明上面的长度算错了，必须报出来而不是交出一个坏文件。
+    if (!ok || !bio_writer_ok(&w) || bio_writer_used(&w) != total) {
+        LOG_ERROR(".mesh 序列化内部不一致：期望 %llu 字节，实际写入 %llu",
+                  (unsigned long long)total, (unsigned long long)bio_writer_used(&w));
+        return false;
     }
 
     if (out_bytes != NULL) {
@@ -180,20 +128,23 @@ bool mesh_file_parse(arena_t *arena, const void *data, usize size, mesh_file_t *
     }
     memset(out_file, 0, sizeof(*out_file));
 
-    const u8 *bytes = (const u8 *)data;
-
     if (size < MESH_FILE_HEADER_SIZE) {
         LOG_ERROR(".mesh 文件太小：%llu 字节（光头部就要 %u）", (unsigned long long)size,
                   (unsigned)MESH_FILE_HEADER_SIZE);
         return false;
     }
 
-    const u32 magic = mf_get_u32(bytes + MF_OFF_MAGIC);
-    const u32 version = mf_get_u32(bytes + MF_OFF_VERSION);
-    const u32 vertex_count = mf_get_u32(bytes + MF_OFF_VERTEX_COUNT);
-    const u32 index_count = mf_get_u32(bytes + MF_OFF_INDEX_COUNT);
-    const u32 vertex_stride = mf_get_u32(bytes + MF_OFF_VERTEX_STRIDE);
-    const u32 name_length = mf_get_u32(bytes + MF_OFF_NAME_LENGTH);
+    bio_reader_t r;
+    bio_reader_init(&r, data, size);
+
+    u32 magic = 0u, version = 0u, vertex_count = 0u, index_count = 0u;
+    u32 vertex_stride = 0u, name_length = 0u;
+    if (!bio_read_u32(&r, &magic) || !bio_read_u32(&r, &version) ||
+        !bio_read_u32(&r, &vertex_count) || !bio_read_u32(&r, &index_count) ||
+        !bio_read_u32(&r, &vertex_stride) || !bio_read_u32(&r, &name_length)) {
+        LOG_ERROR(".mesh 头部读取失败（%llu 字节）", (unsigned long long)size);
+        return false;
+    }
 
     if (magic != MESH_FILE_MAGIC) {
         LOG_ERROR(".mesh 魔数不符：期望 0x%08X，实际 0x%08X（这不是 .mesh 文件）",
@@ -237,6 +188,18 @@ bool mesh_file_parse(arena_t *arena, const void *data, usize size, mesh_file_t *
         return false;
     }
 
+    // 头部剩下的字段：包围盒 + reserved。顺序必须与写入端一致。
+    vec3_t bounds_min, bounds_max;
+    if (!bio_read_f32(&r, &bounds_min.x) || !bio_read_f32(&r, &bounds_min.y) ||
+        !bio_read_f32(&r, &bounds_min.z) || !bio_read_f32(&r, &bounds_max.x) ||
+        !bio_read_f32(&r, &bounds_max.y) || !bio_read_f32(&r, &bounds_max.z) ||
+        !bio_skip(&r, MF_RESERVED_BYTES)) {
+        LOG_ERROR(".mesh 头部包围盒读取失败");
+        return false;
+    }
+    bounds_min.pad = 0.0f;
+    bounds_max.pad = 0.0f;
+
     mesh_vertex_t *vertices = (mesh_vertex_t *)arena_alloc(arena, vertex_bytes);
     u32           *indices =
         (index_bytes > 0u) ? (u32 *)arena_alloc(arena, index_bytes) : NULL;
@@ -247,14 +210,12 @@ bool mesh_file_parse(arena_t *arena, const void *data, usize size, mesh_file_t *
         return false;
     }
 
-    usize offset = MESH_FILE_HEADER_SIZE;
-    memcpy(vertices, bytes + offset, vertex_bytes);
-    offset += vertex_bytes;
-    if (index_bytes > 0u) {
-        memcpy(indices, bytes + offset, index_bytes);
-        offset += index_bytes;
+    if (!bio_read_bytes(&r, vertices, vertex_bytes) ||
+        !bio_read_bytes(&r, indices, index_bytes) ||
+        !bio_read_bytes(&r, name, name_length)) {
+        LOG_ERROR(".mesh 数据区不完整");
+        return false;
     }
-    memcpy(name, bytes + offset, name_length);
     name[name_length] = '\0';
 
     // 索引越界必须在交给 GPU 之前查出来：驱动越界读不会报错，
@@ -267,8 +228,8 @@ bool mesh_file_parse(arena_t *arena, const void *data, usize size, mesh_file_t *
         }
     }
 
-    mf_get_bounds(bytes + MF_OFF_BOUNDS_MIN, &out_file->bounds_min);
-    mf_get_bounds(bytes + MF_OFF_BOUNDS_MAX, &out_file->bounds_max);
+    out_file->bounds_min = bounds_min;
+    out_file->bounds_max = bounds_max;
     out_file->vertices = vertices;
     out_file->vertex_count = vertex_count;
     out_file->indices = indices;

@@ -523,7 +523,8 @@ bool pool_init(pool_t *pool, allocator_t *alloc, usize slot_size, usize slot_cou
         pool->slots[i].next_free  = (i + 1u < capacity) ? (i + 1u) : POOL_NIL;
     }
 
-    pool->free_head  = 1;
+    pool->free_head  = (capacity > 1u) ? 1u : POOL_NIL;
+    pool->free_tail  = (capacity > 1u) ? (capacity - 1u) : POOL_NIL;
     pool->free_count = capacity - 1u;
     return true;
 }
@@ -559,6 +560,11 @@ handle_t pool_alloc(pool_t *pool)
     pool_slot_t *slot  = &pool->slots[index];
 
     pool->free_head = slot->next_free;
+    if (pool->free_head == POOL_NIL) {
+        // 队列空了。free_tail 必须一起清掉，否则下一次释放会把槽位
+        // 挂到一个已经不存在的尾巴上，链表就断了。
+        pool->free_tail = POOL_NIL;
+    }
     slot->in_use    = 1;
     slot->next_free = POOL_NIL;
 
@@ -600,8 +606,17 @@ bool pool_free(pool_t *pool, handle_t handle)
     }
 
     slot->in_use    = 0;
-    slot->next_free = pool->free_head;
-    pool->free_head = index;
+    slot->next_free = POOL_NIL;
+
+    // 释放的槽位排到空闲队列**尾部**（见 pool_t.free_tail 的注释：
+    // 这是把 8 位代际的回绕周期放大到实际不可达的关键）。
+    if (pool->free_head == POOL_NIL) {
+        pool->free_head = index;
+        pool->free_tail = index;
+    } else {
+        pool->slots[pool->free_tail].next_free = index;
+        pool->free_tail                        = index;
+    }
 
     pool->free_count++;
     pool->live_count--;

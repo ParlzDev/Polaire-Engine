@@ -125,6 +125,8 @@ add_library(engine STATIC
     src/core/memory.c
     src/core/array.c
     src/core/hash.c
+    src/core/byte_io.c
+    src/core/json.c
     # 平台层（Win32）
     src/platform/win32/win32_console.c
     src/platform/win32/win32_thread.c

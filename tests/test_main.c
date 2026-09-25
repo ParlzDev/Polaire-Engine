@@ -45,6 +45,7 @@ int main(int argc, char **argv)
     test_light_register();
     test_render_target_register();
     test_mesh_file_register();
+    test_json_register();
 
     const char *filter = (argc > 1) ? argv[1] : NULL;
     const int   result = test_run_all(filter);
