@@ -52,6 +52,7 @@ int main(int argc, char **argv)
     test_scene_io_register();
     test_prefab_register();
     test_tilemap_register();
+    test_failure_paths_register();
 
     const char *filter = (argc > 1) ? argv[1] : NULL;
     const int   result = test_run_all(filter);

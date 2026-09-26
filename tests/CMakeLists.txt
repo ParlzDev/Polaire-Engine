@@ -20,6 +20,7 @@ add_executable(engine_tests
     test_sprite.c
     test_atlas.c
     test_tilemap.c
+    test_failure_paths.c
     test_batch.c
     test_frustum.c
     test_pbr.c
