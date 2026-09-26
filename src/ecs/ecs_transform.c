@@ -125,7 +125,16 @@ ecs_transform_t *ecs_transform_get_or_add(ecs_world_t *world, entity_t entity)
         LOG_ERROR("Transform 未注册，先调用 ecs_register_builtin_components");
         return NULL;
     }
-    return (ecs_transform_t *)ecs_get_or_add(world, entity, id, NULL);
+    // "第一次拿到 Transform"这件事必须重建拓扑序：没有它，这个实体就不在
+    // 世界变换的遍历清单里，也就永远不会被算出世界矩阵。
+    // 只在**新增**时标脏 —— 改变本地值不需要重建（遍历顺序没变，
+    // 而矩阵本来每帧都重算），那是另一个常见问题。
+    const bool adding = !ecs_has(world, entity, id);
+    ecs_transform_t *t = (ecs_transform_t *)ecs_get_or_add(world, entity, id, NULL);
+    if (adding) {
+        ecs_mark_hierarchy_dirty(world);
+    }
+    return t;
 }
 
 bool ecs_transform_set_local(ecs_world_t *world, entity_t entity, vec3_t position, quat_t rotation,

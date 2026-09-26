@@ -848,6 +848,59 @@ static void hierarchy_world_transform_updates_via_world_update(void)
     ecs_fixture_end(&fx);
 }
 
+// 在世界更新**之后**才创建的实体，也必须在下一次更新里拿到世界变换。
+//
+// 这条抓的是拓扑序的标脏：重建只在 hierarchy_dirty 时发生，而
+// ecs_create_entity 原来只标 dense_dirty 不标 hierarchy_dirty。
+// 结果不是崩溃也不是报错 —— 新实体进不了那次拓扑快照，于是永远算不出世界矩阵，
+// 症状是"实体建成功了、组件也都在、就是看不见"。
+// 为什么 06_scene 里看不出来：整场景加载发生在第一次更新之前（世界初始化时标过脏），
+// 而带子节点的预制体在 set_parent 时才标脏。漏出来的形态是"单实体预制体第二次
+// 实例化就不出现"，见 tests/test_prefab.c 的 is_a_snapshot_not_a_window。
+static void ecs_entity_created_after_update_gets_world_transform(void)
+{
+    ecs_fixture_t fx;
+    ecs_fixture_begin(&fx, "late_entity", 32u);
+
+    // 先跑一次更新：这一次会把"当前存在的实体"收进拓扑序并把脏位清掉
+    const entity_t early = ecs_create_entity(fx.world);
+    EXPECT_TRUE(ecs_transform_set_local(fx.world, early, vec3_make(1.0f, 0.0f, 0.0f),
+                                        quat_identity(), vec3_one()));
+    (void)ecs_world_update(fx.world, 0.0f);
+    ecs_world_transform_t wt;
+    EXPECT_TRUE(ecs_transform_get_world(fx.world, early, &wt));
+    EXPECT_NEAR((double)wt.model.col[3].x, 1.0, 1e-4);
+
+    // 之后再建的实体：没有 set_parent、没有别的结构事件，只有"它存在了"
+    ecs_world_stats_t stats_before;
+    ecs_world_get_stats(fx.world, &stats_before);
+    const entity_t late = ecs_create_entity(fx.world);
+    EXPECT_TRUE(ecs_transform_set_local(fx.world, late, vec3_make(5.0f, 2.0f, 0.0f),
+                                        quat_identity(), vec3_one()));
+    (void)ecs_world_update(fx.world, 0.0f);
+
+    EXPECT_TRUE(ecs_transform_get_world(fx.world, late, &wt));
+    EXPECT_NEAR((double)wt.model.col[3].x, 5.0, 1e-4);
+    EXPECT_NEAR((double)wt.model.col[3].y, 2.0, 1e-4);
+    ecs_world_stats_t stats_after;
+    ecs_world_get_stats(fx.world, &stats_after);
+    EXPECT_GT_U64((usize)stats_after.hierarchy_rebuilds, (usize)stats_before.hierarchy_rebuilds);
+    EXPECT_GE_U64((usize)ecs_hierarchy_node_count(fx.world), 2u);
+
+    // 给一个早就存在的实体补上 Transform，同样要进得了拓扑序
+    const entity_t bare = ecs_create_entity(fx.world);
+    (void)ecs_world_update(fx.world, 0.0f); // 它还没有 Transform
+    EXPECT_NULL(ecs_peek(fx.world, bare, fx.builtin.world_transform));
+    (void)ecs_transform_get_or_add(fx.world, bare);
+    (void)ecs_transform_set_local(fx.world, bare, vec3_make(0.0f, 7.0f, 0.0f), quat_identity(),
+                                  vec3_one());
+    (void)ecs_world_update(fx.world, 0.0f);
+    EXPECT_TRUE(ecs_transform_get_world(fx.world, bare, &wt));
+    EXPECT_NEAR((double)wt.model.col[3].y, 7.0, 1e-4);
+
+    ecs_fixture_end(&fx);
+}
+
 // 尺度必须沿链累乘：只看父矩阵不看缩放，是非均匀缩放下最常见的错。
 static void hierarchy_scale_composes(void)
 {
@@ -1203,6 +1256,8 @@ void test_ecs_register(void)
     test_register("ecs", "scale_composes", hierarchy_scale_composes);
     test_register("ecs", "world_transform_updates_via_world_update",
                   hierarchy_world_transform_updates_via_world_update);
+    test_register("ecs", "entity_created_after_update_gets_world_transform",
+                  ecs_entity_created_after_update_gets_world_transform);
     test_register("ecs", "rejects_cycles", hierarchy_rejects_cycles);
     test_register("ecs", "rejects_excessive_depth", hierarchy_rejects_excessive_depth);
     test_register("ecs", "rebuild_is_lazy_and_counted", hierarchy_rebuild_is_lazy_and_counted);

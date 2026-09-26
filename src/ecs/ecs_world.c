@@ -309,6 +309,19 @@ entity_t ecs_create_entity(ecs_world_t *world)
         world->entity_peak = live;
     }
     world->dense_dirty = true;
+    // 新实体也要标脏**层级**。
+    //
+    // 拓扑序数组是"哪些实体持有 Transform"的快照，只在 hierarchy_dirty 时重建。
+    // 只标 dense_dirty 的后果不是崩溃也不是报错，而是这个实体**进不了那次快照**，
+    // 于是它永远拿不到世界变换 —— 症状是"实体建成功了、组件也在、就是看不见"。
+    // 06_scene 里它被两件事盖住了：整场景加载发生在第一次 world_update 之前（世界
+    // 初始化时已经标过脏），而带子节点的预制体在 set_parent 时才标脏。
+    // 漏出来的形态是"单实体预制体第二次实例化就不出现"—— 见
+    // tests/test_prefab.c 的 is_a_snapshot_not_a_window。
+    //
+    // 代价要说清：这条让"每次创建实体"都置一位 bool，而不是每次都重建。
+    // 重建仍然是每帧最多一次，所以创建 10 万个实体也只多 10 万次写一个字节。
+    world->hierarchy_dirty = true;
     return handle;
 }
 

@@ -16,6 +16,7 @@
 #include "engine/core/log.h"
 #include "engine/core/mat.h"
 #include "engine/core/memory.h"
+#include "engine/ecs/system.h" // ecs_world_update 的声明在这里，不在 world.h
 #include "engine/ecs/transform.h"
 #include "engine/ecs/world.h"
 #include "engine/render/mesh.h"
@@ -380,6 +381,78 @@ static void prefab_needs_pipelines_in_the_target(void)
 }
 
 // 文件形式：导出一份 .prefab 再读回来，实例化结果和内存版一致。
+// 验收里那句"改动模板不影响已实例化的"此前没有任何断言。
+//
+// 而且这条测试第一次跑就抓到一个真缺陷：第二次实例化出来的实体拿不到世界变换,
+// 因为 `ecs_create_entity` 只标 dense_dirty 不标 hierarchy_dirty ——
+// 新实体进不了拓扑快照，于是"建成功了、组件都在、就是看不见"。
+// 根因的回归测试在 tests/test_ecs.c 的 entity_created_after_update_gets_world_transform,
+// 这条留着是因为它是用户能碰到的那个形态：单实体预制体实例化两次。
+static void prefab_is_a_snapshot_not_a_window(void)
+{
+    prefab_fixture_t src, dst;
+    pf_fixture_begin(&src, "pf_snap_src", true);
+    pf_fixture_begin(&dst, "pf_snap_dst", true);
+
+    const entity_t root = pf_entity(&src, "snap_root", vec3_make(3.0f, 1.0f, 0.0f),
+                                    SCENE_RESOURCE_NONE, SCENE_RESOURCE_NONE);
+    EXPECT_TRUE(entity_is_valid(root));
+
+    prefab_t *p = prefab_from_subtree(src.scene, root, &src.tracker.base, NULL);
+    EXPECT_NOT_NULL(p);
+    const usize snapshot_size = prefab_byte_size(p);
+    EXPECT_GT_U64(snapshot_size, SCENE_FILE_HEADER_SIZE);
+
+    const entity_t first = pf_instantiate(p, &dst, ENTITY_NONE, NULL);
+    EXPECT_TRUE(entity_is_valid(first));
+    (void)ecs_world_update(scene_world(dst.scene), 0.0f);
+    ecs_world_transform_t wt_first;
+    EXPECT_TRUE(ecs_transform_get_world(scene_world(dst.scene), first, &wt_first));
+    EXPECT_NEAR((double)wt_first.model.col[3].x, 3.0, 1e-4);
+
+    // 改模板：根挪远，并且往源场景再添一个实体（相当于"编辑器里又改了一版"）
+    EXPECT_TRUE(ecs_transform_set_local(scene_world(src.scene), root,
+                                        vec3_make(77.0f, 77.0f, 77.0f), quat_identity(),
+                                        vec3_splat(3.0f)));
+    (void)pf_entity(&src, "snap_extra", vec3_make(0.0f, 5.0f, 0.0f), SCENE_RESOURCE_NONE,
+                    SCENE_RESOURCE_NONE);
+
+    // 已经拿到的那份预制体字节不许因为源场景被改而变（它是快照，不是窗口）
+    EXPECT_EQ_U64(prefab_byte_size(p), snapshot_size);
+
+    // 同一个预制体再实例化：位置必须与第一次一致（不受源场景改动影响）
+    const entity_t second = pf_instantiate(p, &dst, ENTITY_NONE, NULL);
+    EXPECT_TRUE(entity_is_valid(second));
+    (void)ecs_world_update(scene_world(dst.scene), 0.0f);
+    ecs_world_transform_t wt_second;
+    EXPECT_TRUE(ecs_transform_get_world(scene_world(dst.scene), second, &wt_second));
+    EXPECT_NEAR((double)wt_second.model.col[3].x, (double)wt_first.model.col[3].x, 1e-4);
+    EXPECT_NEAR((double)wt_second.model.col[3].y, (double)wt_first.model.col[3].y, 1e-4);
+
+    // 第一个实例也不漂 —— 这才是"不影响已实例化的"那半句
+    ecs_world_transform_t wt_first_again;
+    EXPECT_TRUE(ecs_transform_get_world(scene_world(dst.scene), first, &wt_first_again));
+    EXPECT_NEAR((double)wt_first_again.model.col[3].x, (double)wt_first.model.col[3].x, 1e-4);
+    EXPECT_NEAR((double)wt_first_again.model.col[3].z, (double)wt_first.model.col[3].z, 1e-4);
+
+    // 反过来也要成立：重新导出的那一份**必须**带上改动。
+    // 没有这一条的话，上面的"没变"可能只是因为源场景的改动被吞掉了 —— 那是另一个 bug。
+    prefab_t *p2 = prefab_from_subtree(src.scene, root, &src.tracker.base, NULL);
+    EXPECT_NOT_NULL(p2);
+    const entity_t third = pf_instantiate(p2, &dst, ENTITY_NONE, NULL);
+    EXPECT_TRUE(entity_is_valid(third));
+    (void)ecs_world_update(scene_world(dst.scene), 0.0f);
+    ecs_world_transform_t wt_third;
+    EXPECT_TRUE(ecs_transform_get_world(scene_world(dst.scene), third, &wt_third));
+    EXPECT_TRUE(wt_third.model.col[3].x > 50.0f);
+    EXPECT_EQ_U64(scene_subtree_size(dst.scene, third), 1u);
+
+    prefab_destroy(p2);
+    prefab_destroy(p);
+    pf_fixture_end(&dst);
+    pf_fixture_end(&src);
+}
+
 static void prefab_file_roundtrip(void)
 {
     prefab_fixture_t src;
@@ -425,4 +498,5 @@ void test_prefab_register(void)
     test_register("prefab", "attaches_under_a_parent", prefab_attaches_under_a_parent);
     test_register("prefab", "needs_pipelines_in_the_target", prefab_needs_pipelines_in_the_target);
     test_register("prefab", "file_roundtrip", prefab_file_roundtrip);
+    test_register("prefab", "is_a_snapshot_not_a_window", prefab_is_a_snapshot_not_a_window);
 }
