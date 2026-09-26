@@ -45,5 +45,6 @@ void test_json_register(void);
 void test_ecs_register(void);
 void test_scene_io_register(void);
 void test_prefab_register(void);
+void test_tilemap_register(void);
 
 #endif // MYENGINE_TEST_SUITES_H
