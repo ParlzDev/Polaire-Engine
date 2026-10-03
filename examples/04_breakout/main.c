@@ -530,7 +530,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "无法打开日志文件，继续使用控制台输出\n");
     }
 
-    LOG_INFO("MyEngine %s —— M3 打砖块", MYENGINE_VERSION_STRING);
+    LOG_INFO("Polaire Engine %s —— M3 打砖块", POLAIRE_VERSION_STRING);
 
     if (!platform_time_init(true)) {
         log_shutdown();
@@ -553,7 +553,7 @@ int main(int argc, char **argv)
     u32                frames_rendered = 0;
 
     platform_window_desc_t window_desc = platform_window_desc_default();
-    window_desc.title = "MyEngine M3 —— 打砖块";
+    window_desc.title = "Polaire Engine M3 —— 打砖块";
     window_desc.width = options.width;
     window_desc.height = options.height;
     window_desc.visible = !options.hidden;
@@ -936,7 +936,7 @@ int main(int argc, char **argv)
             render_stats_t stats;
             renderer_get_stats(renderer, &stats);
             snprintf(title, sizeof(title),
-                     "MyEngine M3 打砖块 | 分数 %u | 生命 %u | 绘制 %u | %.0f FPS", game.score,
+                     "Polaire Engine M3 打砖块 | 分数 %u | 生命 %u | 绘制 %u | %.0f FPS", game.score,
                      game.lives, stats.draw_calls, clock.fps);
             platform_window_set_title(window, title);
         }

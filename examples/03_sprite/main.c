@@ -252,7 +252,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "无法打开日志文件，继续使用控制台输出\n");
     }
 
-    LOG_INFO("MyEngine %s —— M3 精灵批渲染", MYENGINE_VERSION_STRING);
+    LOG_INFO("Polaire Engine %s —— M3 精灵批渲染", POLAIRE_VERSION_STRING);
     LOG_INFO("目标精灵数: %u", options.sprite_count);
 
     if (!platform_time_init(true)) {
@@ -278,7 +278,7 @@ int main(int argc, char **argv)
 
     // ---- 窗口 ----
     platform_window_desc_t window_desc = platform_window_desc_default();
-    window_desc.title = "MyEngine M3 —— 精灵批渲染";
+    window_desc.title = "Polaire Engine M3 —— 精灵批渲染";
     window_desc.width = options.width;
     window_desc.height = options.height;
     window_desc.visible = !options.hidden;
@@ -602,7 +602,7 @@ int main(int argc, char **argv)
             renderer_get_stats(renderer, &stats);
 
             snprintf(title, sizeof(title),
-                     "MyEngine M3 | 精灵 %u | 绘制调用 %u | %.2f ms | %.0f FPS", active_count,
+                     "Polaire Engine M3 | 精灵 %u | 绘制调用 %u | %.2f ms | %.0f FPS", active_count,
                      stats.draw_calls, clock.delta_ms, clock.fps);
             platform_window_set_title(window, title);
         }

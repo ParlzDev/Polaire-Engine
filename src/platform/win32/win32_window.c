@@ -16,7 +16,7 @@
 #include "engine/core/assert.h"
 #include "engine/core/log.h"
 
-#define WIN32_WINDOW_CLASS_NAME L"MyEngineWindowClass"
+#define WIN32_WINDOW_CLASS_NAME L"PolaireWindowClass"
 #define WIN32_TITLE_CAPACITY 512
 
 // =============================================================================
@@ -420,7 +420,7 @@ platform_window_desc_t platform_window_desc_default(void)
 {
     platform_window_desc_t desc;
     memset(&desc, 0, sizeof(desc));
-    desc.title = "MyEngine";
+    desc.title = "Polaire Engine";
     desc.width = 1280;
     desc.height = 720;
     desc.resizable = true;

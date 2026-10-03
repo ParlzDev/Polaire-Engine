@@ -7,8 +7,8 @@
 //  新增测试文件时：在这里加一行声明，并在 test_main.c 里加一行调用。
 //  忘了加不会报错，但会变成"测试根本没跑"——所以这个文件要当清单看。
 // =============================================================================
-#ifndef MYENGINE_TEST_SUITES_H
-#define MYENGINE_TEST_SUITES_H
+#ifndef POLAIRE_TEST_SUITES_H
+#define POLAIRE_TEST_SUITES_H
 
 // M0：基础层
 void test_types_register(void);
@@ -48,4 +48,4 @@ void test_prefab_register(void);
 void test_tilemap_register(void);
 void test_failure_paths_register(void);
 
-#endif // MYENGINE_TEST_SUITES_H
+#endif // POLAIRE_TEST_SUITES_H

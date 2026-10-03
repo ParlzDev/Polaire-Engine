@@ -98,7 +98,7 @@
 // 一层 components 数组就把行推到 80 列以外。
 #define SCENE_JSON_INDENT 2u
 
-#define SCENE_JSON_FORMAT "MyEngine-Scene"
+#define SCENE_JSON_FORMAT "Polaire-Scene"
 
 // 字符串字段的中转缓冲区。宽度取自**定义它的地方**（资源路径 = 名字上限 ×2），
 // 而不是另拍一个数：再放宽一点就会让"容量算错"这类 bug 藏在一个没人碰到的余量里。

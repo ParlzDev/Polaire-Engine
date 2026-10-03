@@ -121,7 +121,7 @@ static void GLAPI win32_gl_debug_callback(GLenum source, GLenum type, GLuint id,
 static bool win32_bootstrap_wgl(allocator_t *alloc, wgl_api_t *out_wgl)
 {
     platform_window_desc_t desc = platform_window_desc_default();
-    desc.title = "MyEngine WGL bootstrap";
+    desc.title = "Polaire Engine WGL bootstrap";
     desc.width = 8;
     desc.height = 8;
     desc.resizable = false;

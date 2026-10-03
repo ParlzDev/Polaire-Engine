@@ -16,8 +16,8 @@
 //  实现放在头文件里（static inline）：它只有十几行，单独一个 .c 还要进
 //  tests/CMakeLists.txt 的源文件清单，而那个清单是按"一个测试一套"排的。
 // =============================================================================
-#ifndef MYENGINE_TESTS_FAKE_ALLOCATOR_H
-#define MYENGINE_TESTS_FAKE_ALLOCATOR_H
+#ifndef POLAIRE_TESTS_FAKE_ALLOCATOR_H
+#define POLAIRE_TESTS_FAKE_ALLOCATOR_H
 
 #include <stdlib.h>
 #include <string.h>
@@ -98,4 +98,4 @@ static void fake_allocator_drain(fake_allocator_t *f)
     }
 }
 
-#endif // MYENGINE_TESTS_FAKE_ALLOCATOR_H
+#endif // POLAIRE_TESTS_FAKE_ALLOCATOR_H

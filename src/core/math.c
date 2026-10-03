@@ -13,13 +13,13 @@
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 #include <pmmintrin.h>
 #include <xmmintrin.h>
-#define MYENGINE_HAS_SSE_FP_ENV 1
+#define POLAIRE_HAS_SSE_FP_ENV 1
 #elif defined(__SSE__)
 #include <pmmintrin.h>
 #include <xmmintrin.h>
-#define MYENGINE_HAS_SSE_FP_ENV 1
+#define POLAIRE_HAS_SSE_FP_ENV 1
 #else
-#define MYENGINE_HAS_SSE_FP_ENV 0
+#define POLAIRE_HAS_SSE_FP_ENV 0
 #endif
 
 // 只是记录"我们请求过什么"，不代表当前线程真实状态。
@@ -33,7 +33,7 @@ bool math_get_flush_denormals(void)
 
 void math_set_flush_denormals(bool enabled)
 {
-#if MYENGINE_HAS_SSE_FP_ENV
+#if POLAIRE_HAS_SSE_FP_ENV
     _MM_SET_FLUSH_ZERO_MODE(enabled ? _MM_FLUSH_ZERO_ON : _MM_FLUSH_ZERO_OFF);
 #ifdef _MM_SET_DENORMALS_ZERO_MODE
     _MM_SET_DENORMALS_ZERO_MODE(enabled ? _MM_DENORMALS_ZERO_ON : _MM_DENORMALS_ZERO_OFF);

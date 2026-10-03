@@ -108,7 +108,7 @@ int test_run_all(const char *filter)
     const char *c_red   = ansi ? "\x1b[31m" : "";
     const char *c_bold  = ansi ? "\x1b[1m" : "";
 
-    printf("%s========== MyEngine 单元测试 ==========%s\n", c_bold, c_reset);
+    printf("%s========== Polaire Engine 单元测试 ==========%s\n", c_bold, c_reset);
     if (filter != NULL) {
         printf("%s筛选条件: \"%s\"%s\n", c_dim, filter, c_reset);
     }

@@ -1501,7 +1501,7 @@ int main(int argc, char **argv)
     if (!log_init("06_scene.log", LOG_LEVEL_INFO)) {
         fprintf(stderr, "无法打开日志文件，继续使用控制台输出\n");
     }
-    LOG_INFO("MyEngine %s —— M5 场景层", MYENGINE_VERSION_STRING);
+    LOG_INFO("Polaire Engine %s —— M5 场景层", POLAIRE_VERSION_STRING);
 
     if (!rooted) {
         // 报一次就说清楚：后面的"资产读不到"全是这个原因，不是资产坏了。
@@ -1541,7 +1541,7 @@ int main(int argc, char **argv)
 
     // ---- 窗口与渲染器 ----
     platform_window_desc_t window_desc = platform_window_desc_default();
-    window_desc.title = "MyEngine M5 —— 场景层";
+    window_desc.title = "Polaire Engine M5 —— 场景层";
     window_desc.width = options.width;
     window_desc.height = options.height;
     window_desc.visible = !options.hidden;
@@ -1829,7 +1829,7 @@ int main(int argc, char **argv)
             render_stats_t stats;
             renderer_get_stats(renderer, &stats);
             snprintf(title, sizeof(title),
-                     "MyEngine M5 | %.0f fps | 实体 %u | 提交 %d 精灵 %d 剔除 %u | Spin %u | "
+                     "Polaire Engine M5 | %.0f fps | 实体 %u | 提交 %d 精灵 %d 剔除 %u | Spin %u | "
                      "柱子 %u",
                      (double)clock.fps,
                      (unsigned)ecs_collect_entities(scene_world(scene), NULL, 0u),

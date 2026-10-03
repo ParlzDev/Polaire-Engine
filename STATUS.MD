@@ -1,3 +1,15 @@
+# STATUS.MD —— 逐里程碑验收状态
+
+引擎名 **Polaire Engine**，2026-10-03 定名（此前占位名 MyEngine，代码与文档里已无残留）。
+改名动到了三处不只是字符串的地方：CMake 选项 `POLAIRE_*`、`POLAIRE_VERSION_*` 宏、
+以及 JSON 存档的 `format` 串 `Polaire-Scene`。
+后两处都有实测：带旧 `format` 串的文件现在加载失败、退出码 1、日志指名它看到的串；
+二进制存档不受影响（魔数是数值 `SCEN`）。
+第一处是 CMake 的机制推论，没有实测：选项名变了，旧 build 目录的缓存里只有 `MYENGINE_WERROR`，
+增量构建时 `option(POLAIRE_WERROR)` 会取默认值 OFF，于是 `-Werror` 与 sanitizer 静默消失 ——
+所以这次四个 build 目录全部删掉重配，配完用 `CMakeCache.txt` 与 `compile_commands.json` 反查过
+`POLAIRE_WERROR:BOOL=ON` 和命令行里的 `-Werror` 确实在生效。
+
 阶段 0：地基（1-2周）  —— ☑ 已完成（2026-09-24）
 
     ☑
@@ -198,7 +210,9 @@
   ✅ "1000 个 sprites 示例"改成 1k / 10k / 100k 三档实测（只测 1000 的话任何 O(n²) 都能混过去）
   ✅ 2D 与 3D 同帧共存**用读回像素证明**：摘掉精灵 13344 像素变、挪走方块 59963 像素变、两区域零重叠；
      屏幕空间的 HUD 映射规则仍归 M6（那是混合渲染的定义，不是这层的事）
-  ✅ 365 用例 / 26727 断言全过；debug / release / -Werror / ASan+UBSan 四档零告警零报错；示例短跑零内存泄漏、零 GL 错误
+  ✅ 378 用例 / 26885 断言全过（2026-10-03 改名后重测；本行原记 365 / 26727，差出的 13 条是
+     那之后补的 tilemap 7 条 + 分配失败路径 4 条 + 层级世界矩阵回归 2 条）；
+     debug / release / -Werror / ASan+UBSan 四档零告警零报错；示例短跑零内存泄漏、零 GL 错误
   ✅ 详见 docs/M5-设计决策.md、prompts/M5_prompt.md
 阶段 6：2D/3D 混合渲染（2周）
 

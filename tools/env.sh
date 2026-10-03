@@ -7,9 +7,9 @@
 #      cmake --preset debug && cmake --build --preset debug
 #
 #  路径可用环境变量覆盖，换机器时不必改脚本：
-#      export MYENGINE_CLANG_BIN=/path/to/llvm/bin
-#      export MYENGINE_CMAKE_BIN=/path/to/cmake/bin
-#      export MYENGINE_NINJA_BIN=/path/to/ninja
+#      export POLAIRE_CLANG_BIN=/path/to/llvm/bin
+#      export POLAIRE_CMAKE_BIN=/path/to/cmake/bin
+#      export POLAIRE_NINJA_BIN=/path/to/ninja
 #
 #  注意 1：本机 clang 是 MSVC 目标（x86_64-pc-windows-msvc），它靠自动探测找到
 #  Visual Studio 的 CRT 头与库。因此 Visual Studio 必须安装（本机在 D 盘）。
@@ -19,12 +19,12 @@
 #  结果就是"目录明明存在、工具却找不到"。必须先转成 /d/foo/bar。
 # =============================================================================
 
-MYENGINE_CLANG_BIN="${MYENGINE_CLANG_BIN:-F:/Path/clang+llvm-23.1.1-x86_64-pc-windows-msvc/bin}"
-MYENGINE_CMAKE_BIN="${MYENGINE_CMAKE_BIN:-F:/Path/CMake/bin}"
-MYENGINE_NINJA_BIN="${MYENGINE_NINJA_BIN:-D:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja}"
+POLAIRE_CLANG_BIN="${POLAIRE_CLANG_BIN:-F:/Path/clang+llvm-23.1.1-x86_64-pc-windows-msvc/bin}"
+POLAIRE_CMAKE_BIN="${POLAIRE_CMAKE_BIN:-F:/Path/CMake/bin}"
+POLAIRE_NINJA_BIN="${POLAIRE_NINJA_BIN:-D:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja}"
 
 # D:/foo  ->  /d/foo
-_myengine_to_posix() {
+_polaire_to_posix() {
     case "$1" in
         [A-Za-z]:/*)
             local drive
@@ -37,9 +37,9 @@ _myengine_to_posix() {
     esac
 }
 
-_myengine_prepend() {
+_polaire_prepend() {
     local dir
-    dir=$(_myengine_to_posix "$1")
+    dir=$(_polaire_to_posix "$1")
     if [ -d "$dir" ]; then
         case ":$PATH:" in
             *":$dir:"*) ;;
@@ -50,14 +50,14 @@ _myengine_prepend() {
     fi
 }
 
-_myengine_prepend "$MYENGINE_CLANG_BIN"
-_myengine_prepend "$MYENGINE_CMAKE_BIN"
-_myengine_prepend "$MYENGINE_NINJA_BIN"
+_polaire_prepend "$POLAIRE_CLANG_BIN"
+_polaire_prepend "$POLAIRE_CMAKE_BIN"
+_polaire_prepend "$POLAIRE_NINJA_BIN"
 export PATH
 
-unset -f _myengine_prepend _myengine_to_posix
+unset -f _polaire_prepend _polaire_to_posix
 
-echo "MyEngine 工具链已就绪:"
+echo "Polaire Engine 工具链已就绪:"
 printf '  clang : %s\n' "$(command -v clang || echo '未找到')"
 printf '  cmake : %s\n' "$(command -v cmake || echo '未找到')"
 printf '  ninja : %s\n' "$(command -v ninja || echo '未找到')"

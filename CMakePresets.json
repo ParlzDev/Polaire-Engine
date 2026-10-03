@@ -18,8 +18,8 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "MYENGINE_BUILD_TESTS": "ON",
-        "MYENGINE_BUILD_EXAMPLES": "ON"
+        "POLAIRE_BUILD_TESTS": "ON",
+        "POLAIRE_BUILD_EXAMPLES": "ON"
       }
     },
     {
@@ -28,8 +28,8 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "MYENGINE_BUILD_TESTS": "ON",
-        "MYENGINE_BUILD_EXAMPLES": "ON"
+        "POLAIRE_BUILD_TESTS": "ON",
+        "POLAIRE_BUILD_EXAMPLES": "ON"
       }
     },
     {
@@ -38,9 +38,9 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "MYENGINE_BUILD_TESTS": "ON",
-        "MYENGINE_BUILD_EXAMPLES": "ON",
-        "MYENGINE_SANITIZE": "ON"
+        "POLAIRE_BUILD_TESTS": "ON",
+        "POLAIRE_BUILD_EXAMPLES": "ON",
+        "POLAIRE_SANITIZE": "ON"
       }
     },
     {
@@ -49,9 +49,9 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "MYENGINE_BUILD_TESTS": "ON",
-        "MYENGINE_BUILD_EXAMPLES": "ON",
-        "MYENGINE_WERROR": "ON"
+        "POLAIRE_BUILD_TESTS": "ON",
+        "POLAIRE_BUILD_EXAMPLES": "ON",
+        "POLAIRE_WERROR": "ON"
       }
     }
   ],

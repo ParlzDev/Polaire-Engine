@@ -22,8 +22,8 @@
 //  换编译器就静默失效（测试不再运行，但看起来"全过"）。
 //  显式注册虽然多写一行，但少一次"测试根本没跑"的灾难。
 // =============================================================================
-#ifndef MYENGINE_TEST_FRAMEWORK_H
-#define MYENGINE_TEST_FRAMEWORK_H
+#ifndef POLAIRE_TEST_FRAMEWORK_H
+#define POLAIRE_TEST_FRAMEWORK_H
 
 #include <math.h>
 #include <stdio.h>
@@ -110,13 +110,13 @@ extern u32 g_test_case_failures;
     do {                                                                                           \
         ++g_test_assertions;                                                                       \
         if (!vec2_near((a), (b), (eps))) {                                                         \
-            char myengine_tf_buf[256];                                                             \
-            test_format_vec2(myengine_tf_buf, sizeof(myengine_tf_buf), #a, (a));                   \
-            test_format_vec2(myengine_tf_buf + strlen(myengine_tf_buf),                            \
-                             sizeof(myengine_tf_buf) - strlen(myengine_tf_buf), #b, (b));          \
+            char polaire_tf_buf[256];                                                             \
+            test_format_vec2(polaire_tf_buf, sizeof(polaire_tf_buf), #a, (a));                   \
+            test_format_vec2(polaire_tf_buf + strlen(polaire_tf_buf),                            \
+                             sizeof(polaire_tf_buf) - strlen(polaire_tf_buf), #b, (b));          \
             ++g_test_failures;                                                                     \
             ++g_test_case_failures;                                                                \
-            test_report_failure(__FILE__, __LINE__, "EXPECT_VEC2_NEAR 失败: %s", myengine_tf_buf); \
+            test_report_failure(__FILE__, __LINE__, "EXPECT_VEC2_NEAR 失败: %s", polaire_tf_buf); \
         }                                                                                          \
     } while (0)
 
@@ -124,13 +124,13 @@ extern u32 g_test_case_failures;
     do {                                                                                           \
         ++g_test_assertions;                                                                       \
         if (!vec3_near((a), (b), (eps))) {                                                         \
-            char myengine_tf_buf[256];                                                             \
-            test_format_vec3(myengine_tf_buf, sizeof(myengine_tf_buf), #a, (a));                   \
-            test_format_vec3(myengine_tf_buf + strlen(myengine_tf_buf),                            \
-                             sizeof(myengine_tf_buf) - strlen(myengine_tf_buf), #b, (b));          \
+            char polaire_tf_buf[256];                                                             \
+            test_format_vec3(polaire_tf_buf, sizeof(polaire_tf_buf), #a, (a));                   \
+            test_format_vec3(polaire_tf_buf + strlen(polaire_tf_buf),                            \
+                             sizeof(polaire_tf_buf) - strlen(polaire_tf_buf), #b, (b));          \
             ++g_test_failures;                                                                     \
             ++g_test_case_failures;                                                                \
-            test_report_failure(__FILE__, __LINE__, "EXPECT_VEC3_NEAR 失败: %s", myengine_tf_buf); \
+            test_report_failure(__FILE__, __LINE__, "EXPECT_VEC3_NEAR 失败: %s", polaire_tf_buf); \
         }                                                                                          \
     } while (0)
 
@@ -138,13 +138,13 @@ extern u32 g_test_case_failures;
     do {                                                                                           \
         ++g_test_assertions;                                                                       \
         if (!vec4_near((a), (b), (eps))) {                                                         \
-            char myengine_tf_buf[256];                                                             \
-            test_format_vec4(myengine_tf_buf, sizeof(myengine_tf_buf), #a, (a));                   \
-            test_format_vec4(myengine_tf_buf + strlen(myengine_tf_buf),                            \
-                             sizeof(myengine_tf_buf) - strlen(myengine_tf_buf), #b, (b));          \
+            char polaire_tf_buf[256];                                                             \
+            test_format_vec4(polaire_tf_buf, sizeof(polaire_tf_buf), #a, (a));                   \
+            test_format_vec4(polaire_tf_buf + strlen(polaire_tf_buf),                            \
+                             sizeof(polaire_tf_buf) - strlen(polaire_tf_buf), #b, (b));          \
             ++g_test_failures;                                                                     \
             ++g_test_case_failures;                                                                \
-            test_report_failure(__FILE__, __LINE__, "EXPECT_VEC4_NEAR 失败: %s", myengine_tf_buf); \
+            test_report_failure(__FILE__, __LINE__, "EXPECT_VEC4_NEAR 失败: %s", polaire_tf_buf); \
         }                                                                                          \
     } while (0)
 
@@ -152,13 +152,13 @@ extern u32 g_test_case_failures;
     do {                                                                                           \
         ++g_test_assertions;                                                                       \
         if (!quat_near((a), (b), (eps))) {                                                         \
-            char myengine_tf_buf[256];                                                             \
-            test_format_quat(myengine_tf_buf, sizeof(myengine_tf_buf), #a, (a));                   \
-            test_format_quat(myengine_tf_buf + strlen(myengine_tf_buf),                            \
-                             sizeof(myengine_tf_buf) - strlen(myengine_tf_buf), #b, (b));          \
+            char polaire_tf_buf[256];                                                             \
+            test_format_quat(polaire_tf_buf, sizeof(polaire_tf_buf), #a, (a));                   \
+            test_format_quat(polaire_tf_buf + strlen(polaire_tf_buf),                            \
+                             sizeof(polaire_tf_buf) - strlen(polaire_tf_buf), #b, (b));          \
             ++g_test_failures;                                                                     \
             ++g_test_case_failures;                                                                \
-            test_report_failure(__FILE__, __LINE__, "EXPECT_QUAT_NEAR 失败: %s", myengine_tf_buf); \
+            test_report_failure(__FILE__, __LINE__, "EXPECT_QUAT_NEAR 失败: %s", polaire_tf_buf); \
         }                                                                                          \
     } while (0)
 
@@ -166,17 +166,17 @@ extern u32 g_test_case_failures;
     do {                                                                                           \
         ++g_test_assertions;                                                                       \
         if (!mat4_near((a), (b), (eps))) {                                                         \
-            char myengine_tf_buf[512];                                                             \
-            test_format_mat4(myengine_tf_buf, sizeof(myengine_tf_buf), #a, (a));                   \
-            test_format_mat4(myengine_tf_buf + strlen(myengine_tf_buf),                            \
-                             sizeof(myengine_tf_buf) - strlen(myengine_tf_buf), #b, (b));          \
+            char polaire_tf_buf[512];                                                             \
+            test_format_mat4(polaire_tf_buf, sizeof(polaire_tf_buf), #a, (a));                   \
+            test_format_mat4(polaire_tf_buf + strlen(polaire_tf_buf),                            \
+                             sizeof(polaire_tf_buf) - strlen(polaire_tf_buf), #b, (b));          \
             ++g_test_failures;                                                                     \
             ++g_test_case_failures;                                                                \
-            test_report_failure(__FILE__, __LINE__, "EXPECT_MAT4_NEAR 失败: %s", myengine_tf_buf); \
+            test_report_failure(__FILE__, __LINE__, "EXPECT_MAT4_NEAR 失败: %s", polaire_tf_buf); \
         }                                                                                          \
     } while (0)
 
 #define EXPECT_MAT3_NEAR(a, b, eps)                                                                \
     TF_CHECK(mat3_near((a), (b), (eps)), "EXPECT_MAT3_NEAR(%s, %s, %s) 失败", #a, #b, #eps)
 
-#endif // MYENGINE_TEST_FRAMEWORK_H
+#endif // POLAIRE_TEST_FRAMEWORK_H

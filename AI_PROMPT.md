@@ -1,4 +1,4 @@
-# AI_PROMPT.md —— MyEngine 项目总纲（每次对话常驻）
+# AI_PROMPT.md —— Polaire Engine 项目总纲（每次对话常驻）
 
 > 用法：每次开新对话时，把本文件全文粘贴给 AI，再附上 `prompts/M{n}_prompt.md`。
 > 本文件是"宪法"，只写不随阶段变化的东西。阶段目标写在 prompts/ 下。
@@ -12,10 +12,13 @@
 
 ---
 
-## 项目：MyEngine
+## 项目：Polaire Engine
 
 一套 Windows 优先、纯 C、2D/3D/2.5D 三模式统一的游戏引擎。
-仓库目录为 `北极星-游戏引擎`。
+仓库目录为 `北极星-游戏引擎`，GitHub 仓库为 `Polaire-Engine`。
+英文名由"北极星"（North Star）转法语 *étoile polaire* 截取而来；
+2026-10-03 起作废占位名 MyEngine，代码与文档里不应再出现该字样
+（含 JSON 存档的 `format` 串，现为 `Polaire-Scene`）。
 
 ### 终极目标（北极星）
 

@@ -1,5 +1,5 @@
 # =============================================================================
-#  MyEngine —— Windows 优先、纯 C11、2D/3D/2.5D 三模式统一的游戏引擎
+#  Polaire Engine —— Windows 优先、纯 C11、2D/3D/2.5D 三模式统一的游戏引擎
 #
 #  构建（推荐走 CMakePresets）：
 #      cmake --preset debug
@@ -11,7 +11,7 @@
 # =============================================================================
 cmake_minimum_required(VERSION 3.25)
 
-project(MyEngine
+project(PolaireEngine
         VERSION     0.1.0
         DESCRIPTION "Windows-first, pure-C11, 2D/3D/2.5D unified game engine"
         LANGUAGES   C)
@@ -31,11 +31,11 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # ------------------------------------------------------------------ 构建选项
-option(MYENGINE_BUILD_TESTS    "构建单元测试"                       ON)
-option(MYENGINE_BUILD_EXAMPLES "构建示例程序"                       ON)
-option(MYENGINE_BUILD_TOOLS    "构建离线工具（资产转换等）"          ON)
-option(MYENGINE_WERROR         "把警告视为错误（CI 建议开启）"       OFF)
-option(MYENGINE_SANITIZE       "启用 ASan + UBSan"                  OFF)
+option(POLAIRE_BUILD_TESTS    "构建单元测试"                       ON)
+option(POLAIRE_BUILD_EXAMPLES "构建示例程序"                       ON)
+option(POLAIRE_BUILD_TOOLS    "构建离线工具（资产转换等）"          ON)
+option(POLAIRE_WERROR         "把警告视为错误（CI 建议开启）"       OFF)
+option(POLAIRE_SANITIZE       "启用 ASan + UBSan"                  OFF)
 
 # =============================================================================
 #  engine_warnings —— 统一的告警策略（INTERFACE 库，零编译产物）
@@ -78,7 +78,7 @@ elseif(MSVC)
     )
 endif()
 
-if(MYENGINE_WERROR)
+if(POLAIRE_WERROR)
     if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(engine_warnings INTERFACE -Werror)
     else()
@@ -86,7 +86,7 @@ if(MYENGINE_WERROR)
     endif()
 endif()
 
-if(MYENGINE_SANITIZE)
+if(POLAIRE_SANITIZE)
     if(CMAKE_C_COMPILER_ID MATCHES "Clang")
         target_compile_options(engine_warnings INTERFACE
             -fsanitize=address,undefined
@@ -95,7 +95,7 @@ if(MYENGINE_SANITIZE)
         target_link_options(engine_warnings INTERFACE
             -fsanitize=address,undefined)
     else()
-        message(WARNING "MYENGINE_SANITIZE 目前仅对 Clang 生效，已忽略。")
+        message(WARNING "POLAIRE_SANITIZE 目前仅对 Clang 生效，已忽略。")
     endif()
 endif()
 
@@ -179,7 +179,7 @@ add_library(engine STATIC
     src/render/third_party/stb_truetype_impl.c
 )
 
-add_library(MyEngine::engine ALIAS engine)
+add_library(Polaire::engine ALIAS engine)
 
 # 第三方单头库放在 third_party/ 下，只给需要它的实现文件用。
 # 用 PRIVATE：业务代码不应该直接 include stb_image.h。
@@ -233,27 +233,27 @@ target_compile_definitions(engine
 )
 
 # ------------------------------------------------------------------ 子目录
-if(MYENGINE_BUILD_TESTS)
+if(POLAIRE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
 
-if(MYENGINE_BUILD_EXAMPLES)
+if(POLAIRE_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
-if(MYENGINE_BUILD_TOOLS)
+if(POLAIRE_BUILD_TOOLS)
     add_subdirectory(tools)
 endif()
 
 # ------------------------------------------------------------------ 摘要
 message(STATUS "")
-message(STATUS "MyEngine ${PROJECT_VERSION}")
+message(STATUS "Polaire Engine ${PROJECT_VERSION}")
 message(STATUS "  编译器      : ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
 message(STATUS "  编译器路径  : ${CMAKE_C_COMPILER}")
 message(STATUS "  构建类型    : ${CMAKE_BUILD_TYPE}")
-message(STATUS "  单元测试    : ${MYENGINE_BUILD_TESTS}")
-message(STATUS "  示例        : ${MYENGINE_BUILD_EXAMPLES}")
-message(STATUS "  离线工具    : ${MYENGINE_BUILD_TOOLS}")
-message(STATUS "  Sanitizer   : ${MYENGINE_SANITIZE}")
+message(STATUS "  单元测试    : ${POLAIRE_BUILD_TESTS}")
+message(STATUS "  示例        : ${POLAIRE_BUILD_EXAMPLES}")
+message(STATUS "  离线工具    : ${POLAIRE_BUILD_TOOLS}")
+message(STATUS "  Sanitizer   : ${POLAIRE_SANITIZE}")
 message(STATUS "")

@@ -40,7 +40,7 @@ typedef u8   b8;
 
 // 引擎只支持 64 位目标：句柄位域、指针比较、SIMD 对齐均以此为前提。
 // 32 位下 handle_t 的打包策略需要重新设计，与其静默跑错不如直接拦住。
-_Static_assert(sizeof(void *) == 8, "MyEngine 只支持 64 位目标平台");
+_Static_assert(sizeof(void *) == 8, "Polaire Engine 只支持 64 位目标平台");
 
 // ---------------------------------------------------------------- 常用宏
 #define ENGINE_UNUSED(x) ((void)(x))

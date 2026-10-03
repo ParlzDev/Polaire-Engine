@@ -219,7 +219,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "无法打开日志文件，继续使用控制台输出\n");
     }
 
-    LOG_INFO("MyEngine %s —— M1 窗口 + OpenGL", MYENGINE_VERSION_STRING);
+    LOG_INFO("Polaire Engine %s —— M1 窗口 + OpenGL", POLAIRE_VERSION_STRING);
     LOG_INFO("参数: %ux%u, frames=%u, vsync=%s, hidden=%s, fullscreen=%s",
              options.width, options.height, options.frames, options.vsync ? "on" : "off",
              options.hidden ? "yes" : "no", options.fullscreen ? "yes" : "no");
@@ -243,7 +243,7 @@ int main(int argc, char **argv)
 
     // ---- 窗口 ----
     platform_window_desc_t window_desc = platform_window_desc_default();
-    window_desc.title = "MyEngine M1 —— 窗口 + OpenGL";
+    window_desc.title = "Polaire Engine M1 —— 窗口 + OpenGL";
     window_desc.width = options.width;
     window_desc.height = options.height;
     window_desc.visible = !options.hidden;
@@ -439,7 +439,7 @@ int main(int argc, char **argv)
         // 成为帧时间的一部分（它要过一遍消息队列），实测能吃掉几百微秒。
         if (clock.elapsed_seconds - last_title_update > 0.25) {
             last_title_update = clock.elapsed_seconds;
-            snprintf(title, sizeof(title), "MyEngine M1 | %.1f FPS | %.2f ms | GL %u.%u | 帧 %u",
+            snprintf(title, sizeof(title), "Polaire Engine M1 | %.1f FPS | %.2f ms | GL %u.%u | 帧 %u",
                      clock.fps, clock.delta_ms, gl_context_major_version(context),
                      gl_context_minor_version(context), frames_rendered);
             platform_window_set_title(window, title);

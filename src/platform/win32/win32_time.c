@@ -19,7 +19,7 @@ typedef unsigned int MMRESULT;
 #ifndef WINMMAPI
 #define WINMMAPI __declspec(dllimport)
 #endif
-#define MYENGINE_TIMERR_NOERROR 0
+#define POLAIRE_TIMERR_NOERROR 0
 
 WINMMAPI MMRESULT __stdcall timeBeginPeriod(UINT uPeriod);
 WINMMAPI MMRESULT __stdcall timeEndPeriod(UINT uPeriod);
@@ -52,7 +52,7 @@ bool platform_time_init(bool high_resolution_timer)
         // 不做这一步，Sleep(1) 可能睡 15.6ms，帧率限制器会剧烈抖动。
         // 代价：定时器中断变频繁，略微影响功耗。Win10 2004 起该设置是
         // 进程级的，不再拖累整个系统。
-        if (timeBeginPeriod(1) == MYENGINE_TIMERR_NOERROR) {
+        if (timeBeginPeriod(1) == POLAIRE_TIMERR_NOERROR) {
             g_time.period_raised = true;
         }
     }

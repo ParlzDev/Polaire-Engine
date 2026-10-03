@@ -659,7 +659,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "无法打开日志文件，继续使用控制台输出\n");
     }
 
-    LOG_INFO("MyEngine %s —— M4 3D 渲染管线", MYENGINE_VERSION_STRING);
+    LOG_INFO("Polaire Engine %s —— M4 3D 渲染管线", POLAIRE_VERSION_STRING);
 
     if (!platform_time_init(true)) {
         LOG_ERROR("计时系统初始化失败");
@@ -680,7 +680,7 @@ int main(int argc, char **argv)
     bool               srgb_ran = false;
 
     platform_window_desc_t window_desc = platform_window_desc_default();
-    window_desc.title = "MyEngine M4 —— 3D 渲染管线";
+    window_desc.title = "Polaire Engine M4 —— 3D 渲染管线";
     window_desc.width = options.width;
     window_desc.height = options.height;
     window_desc.visible = !options.hidden;
@@ -1013,7 +1013,7 @@ int main(int argc, char **argv)
             renderer_get_stats(renderer, &stats);
 
             snprintf(title, sizeof(title),
-                     "MyEngine M4 | %.1f FPS | %.2f ms | 绘制 %u | 三角面 %u | 剔除 %u | 光源 %u | "
+                     "Polaire Engine M4 | %.1f FPS | %.2f ms | 绘制 %u | 三角面 %u | 剔除 %u | 光源 %u | "
                      "阴影%s 天空%s 雾%s 剔除%s 曝光%.2f",
                      clock.fps, clock.delta_ms, stats.draw_calls, stats.triangles,
                      renderer_culled_count(renderer), light_set_count(&lights),

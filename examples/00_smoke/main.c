@@ -159,7 +159,7 @@ int main(void)
         fprintf(stderr, "无法打开日志文件，继续使用控制台输出\n");
     }
 
-    LOG_INFO("MyEngine %s —— M0 冒烟示例", MYENGINE_VERSION_STRING);
+    LOG_INFO("Polaire Engine %s —— M0 冒烟示例", POLAIRE_VERSION_STRING);
     LOG_INFO("日志同时输出到控制台与 00_smoke.log");
 
     // 打开 FTZ/DAZ：游戏中出现的非规格化数几乎都是"已经衰减到没意义"的残留，

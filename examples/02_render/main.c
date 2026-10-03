@@ -36,7 +36,7 @@
 //  同时它包含 8 个三角形面，能验证三角化与索引去重。
 // =============================================================================
 static const char *const k_builtin_obj =
-    "# MyEngine 内置测试模型：八面体\n"
+    "# Polaire Engine 内置测试模型：八面体\n"
     "# 用于验证 OBJ 解析（v//vn 索引写法、负索引、索引去重）\n"
     "v  0.0  1.0  0.0\n"
     "v  0.0 -1.0  0.0\n"
@@ -350,7 +350,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "无法打开日志文件，继续使用控制台输出\n");
     }
 
-    LOG_INFO("MyEngine %s —— M2 渲染核心", MYENGINE_VERSION_STRING);
+    LOG_INFO("Polaire Engine %s —— M2 渲染核心", POLAIRE_VERSION_STRING);
 
     if (!platform_time_init(true)) {
         LOG_ERROR("计时系统初始化失败");
@@ -370,7 +370,7 @@ int main(int argc, char **argv)
 
     // ---- 窗口 ----
     platform_window_desc_t window_desc = platform_window_desc_default();
-    window_desc.title = "MyEngine M2 —— 渲染核心";
+    window_desc.title = "Polaire Engine M2 —— 渲染核心";
     window_desc.width = options.width;
     window_desc.height = options.height;
     window_desc.visible = !options.hidden;
@@ -587,7 +587,7 @@ int main(int argc, char **argv)
             renderer_get_stats(renderer, &stats);
 
             snprintf(title, sizeof(title),
-                     "MyEngine M2 | %.1f FPS | %.2f ms | 绘制 %u | 三角面 %u | 队列 %u | %s%s",
+                     "Polaire Engine M2 | %.1f FPS | %.2f ms | 绘制 %u | 三角面 %u | 队列 %u | %s%s",
                      clock.fps, clock.delta_ms, stats.draw_calls, stats.triangles,
                      renderer_queue_count(renderer), show_perspective ? "透视" : "正交",
                      wireframe ? " | 线框" : "");

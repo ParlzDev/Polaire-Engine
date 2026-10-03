@@ -26,9 +26,9 @@
 #include "engine/platform/platform.h"
 #include "engine/render/render.h"
 
-#define MYENGINE_VERSION_MAJOR 0
-#define MYENGINE_VERSION_MINOR 1
-#define MYENGINE_VERSION_PATCH 0
-#define MYENGINE_VERSION_STRING "0.1.0"
+#define POLAIRE_VERSION_MAJOR 0
+#define POLAIRE_VERSION_MINOR 1
+#define POLAIRE_VERSION_PATCH 0
+#define POLAIRE_VERSION_STRING "0.1.0"
 
 #endif // ENGINE_ENGINE_H
