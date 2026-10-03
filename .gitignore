@@ -12,6 +12,11 @@ cmake-build-*/
 *.ilk
 *.exp
 
+# *.obj 同时是 Wavefront 模型的后缀。不放开的话 assets/models/cube.obj 不会进仓库，
+# 而 05_model 的默认加载路径、README 与 prompts/M2 的验收项都指着这个文件。
+# 只放开资产目录，编译产物仍然忽略。
+!assets/**/*.obj
+
 # ---- 工具缓存 ----
 .cache/
 .clangd/
